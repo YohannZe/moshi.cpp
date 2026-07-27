@@ -397,6 +397,24 @@ class GraphContext {
         assert(false);
     }
 
+    // A 1-D F32 constant with caller-supplied contents, uploaded once by alloc().
+    // For values that are expensive to derive but frame-invariant (e.g. the
+    // per-centroid squared norms used by the RVQ search), so they are computed at
+    // graph-build time instead of being recomputed every frame.
+    ggml_tensor * constant_f32( int64_t count, const float * values ) {
+        auto tensor = ggml_new_tensor_1d( ctx, GGML_TYPE_F32, count );
+        if (backend) {
+            constants.push_back({tensor});
+            auto & constant = constants.back();
+            constant.data.resize( ggml_nbytes( tensor ) );
+            memcpy( constant.data.data(), values, ggml_nbytes( tensor ) );
+        } else {
+            assert( tensor->data );
+            memcpy( tensor->data, values, ggml_nbytes( tensor ) );
+        }
+        return tensor;
+    }
+
     ggml_tensor * fill( NE ne, float value ) {
         auto tensor = ggml_new_tensor( ctx, GGML_TYPE_F32, 4, ne );
         auto nelements = ggml_nelements( tensor );

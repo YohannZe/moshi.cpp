@@ -24,6 +24,43 @@ ggml_tensor * moshi_EuclideanCodebook_decode(
     return ggml_get_rows( ctx, codebook->embedding, ggml_cont(ctx, codes) );
 }
 
+// Per-centroid ||e||^2 / 2, read from the codebook once at graph-build time.
+// Frame-invariant, so it must not live in the graph.
+static ggml_tensor * moshi_EuclideanCodebook_half_sqnorm(
+        GraphContext & ctx,
+        moshi_EuclideanCodebook_t * codebook ) {
+    ggml_tensor * emb = codebook->embedding;      // [D, card]
+    const int64_t D = emb->ne[0];
+    const int64_t card = emb->ne[1];
+
+    // Pull the weights to the host in whatever dtype they were stored in.
+    std::vector<uint8_t> raw( ggml_nbytes( emb ) );
+    ggml_backend_tensor_get( emb, raw.data(), 0, raw.size() );
+
+    std::vector<float> flat( (size_t)D * card );
+    if ( emb->type == GGML_TYPE_F32 ) {
+        memcpy( flat.data(), raw.data(), raw.size() );
+    } else if ( emb->type == GGML_TYPE_F16 ) {
+        ggml_fp16_to_fp32_row( (const ggml_fp16_t*)raw.data(), flat.data(), (int64_t)D * card );
+    } else if ( emb->type == GGML_TYPE_BF16 ) {
+        ggml_bf16_to_fp32_row( (const ggml_bf16_t*)raw.data(), flat.data(), (int64_t)D * card );
+    } else {
+        const auto * tt = ggml_get_type_traits( emb->type );
+        assert( tt && tt->to_float );
+        tt->to_float( raw.data(), flat.data(), (int64_t)D * card );
+    }
+
+    std::vector<float> half_sq( card );
+    for ( int64_t e = 0; e < card; e++ ) {
+        const float * row = flat.data() + (size_t)e * D;
+        // double accumulator: D=256 squares summed in f32 loses bits we don't need to lose
+        double acc = 0.0;
+        for ( int64_t d = 0; d < D; d++ ) acc += (double)row[d] * (double)row[d];
+        half_sq[e] = (float)( 0.5 * acc );
+    }
+    return ctx.constant_f32( card, half_sq.data() );
+}
+
 ggml_tensor * moshi_EuclideanCodebook_encode(
         GraphContext & ctx,
         moshi_EuclideanCodebook_t * codebook,
@@ -31,28 +68,42 @@ ggml_tensor * moshi_EuclideanCodebook_encode(
     /*
     Given a tensor `x` of shape `[*, D]`, returns a tensor of integer codes of shape `[*]`.
     The codes are defined as the indexes of the centroids nearest to each vector in `x`.
+
+    Uses the standard expansion instead of a brute-force distance matrix:
+
+        argmin_e ||x - e||^2  =  argmin_e ( ||x||^2 - 2 x.e + ||e||^2 )
+                              =  argmax_e ( x.e - ||e||^2 / 2 )
+
+    ||x||^2 is constant across the codebook for a given x, so it drops out, and the
+    factor 2 is folded into the precomputed norms since argmax is invariant to
+    positive scaling. What remains is one [D,card] x [D,T] matvec plus a broadcast
+    subtract.
+
+    The previous implementation materialised the full [D, card] difference matrix per
+    codebook via ggml_repeat_4d + sub + mul + sum_rows. With card=2048, D=256 that is
+    ~2 MiB per intermediate and ~18 MiB of traffic per codebook; times 32 codebooks
+    times 12.5 frames/s it dominated the encoder. Worse, ggml_repeat_4d always emits a
+    REPEAT node even when the shape is unchanged, so line `b = repeat_4d(b, ...)` was a
+    2 MiB memcpy of *static weights* on every frame. Because GraphContext::alloc() uses
+    ggml_backend_alloc_ctx_tensors rather than a gallocr, those intermediates also held
+    ~256 MiB of permanently-resident graph buffer.
+
+    This form is also numerically better. The old code turned argmin into argmax with
+    `1/(1+d)`, whose derivative d(1/(1+d)) = -dd/(1+d)^2 collapses distance gaps below
+    ~2e-6 into F32 rounding for the d~50 typical here — precisely the near-tie regime
+    where centroid choice is decided. It additionally inherited ggml_vec_argmax_f32's
+    last-maximum tie-break, where torch.argmin takes the first.
     */
 
-    auto a = ggml_cont( ctx, x );
-    auto b = codebook->embedding;
-    auto ane1 = a->ne[1];
-    auto bne1 = b->ne[1];
-    a = ggml_reshape_3d( ctx, a, a->ne[0], 1, a->ne[1] );
-    a = ggml_repeat_4d( ctx, a, a->ne[0], bne1, a->ne[2], 1 );
-    a = ggml_reshape_3d( ctx, a, a->ne[0], a->ne[1] * a->ne[2], a->ne[3] );
+    ggml_tensor * emb = codebook->embedding;                  // [D, card]
 
-    b = ggml_repeat_4d( ctx, b, b->ne[0], b->ne[1] * ane1, b->ne[2], b->ne[3] );
+    // x.e for every centroid -> [card, T]
+    auto score = ggml_mul_mat( ctx, emb, ggml_cont( ctx, x ) );
 
-    auto c = ggml_sub( ctx, b, a );
-    c = ggml_mul( ctx, c, c );
-    c = ggml_sum_rows( ctx, c );
-    c = ggml_reshape_3d( ctx, c, bne1, ane1, 1 );
+    // ... minus ||e||^2/2, broadcast over T
+    score = ggml_sub( ctx, score, moshi_EuclideanCodebook_half_sqnorm( ctx, codebook ) );
 
-    c = ggml_add( ctx, c, ctx.constant(1.f));
-    c = ggml_div( ctx, ctx.fill(c->ne, 1.f), c );
-    c = ggml_argmax( ctx, c );
-
-    return c;
+    return ggml_argmax( ctx, score );
 }
 
 void get_weights( WeightLoader * loader, std::string path,
