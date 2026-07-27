@@ -206,6 +206,18 @@ void unref( mimi_encode_context_t * context ) {
 }
 
 void mimi_encode_reset( mimi_encode_context_t * context ) {
+    // The transformer init() below only zeroes states->offset; it leaves the 11 streaming
+    // convolution ring buffers holding the tail of the previous stream, so the first
+    // frames after a reset were contaminated by whatever was captured before it. That
+    // matters for any app that restarts capture between sessions.
+    //
+    // StateContext::init() re-uploads the stored initial bytes for every state tensor it
+    // owns, and the conv ring buffers are created via state_ctx->fill(ne, 0.f, ...)
+    // (conv.h:110, :220) so those bytes exist and are zeros. Safe to call here because
+    // the encode context owns its own StateContext (see mimi_encode_alloc_context) --
+    // this cannot disturb the decoder's or the LM's state.
+    context->state_ctx->init();
+
     auto scratch = context->codec->moshi->scratch.ptr;
     auto mimi = context->codec->mimi.ptr;
     auto states = context->states.ptr;
