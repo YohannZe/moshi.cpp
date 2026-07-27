@@ -151,7 +151,16 @@ struct moshi_kv_cache_state_t {
     ggml_tensor * values;
 };
 
-#define CACHE_BF16
+// KV cache element type.
+//
+// F16 rather than BF16, for two reasons. At the same 2 bytes F16 carries 10 mantissa
+// bits against BF16's 7, and post-norm activations here sit comfortably inside F16
+// range, so the extra range BF16 buys is worthless while the lost precision is real.
+// More importantly, ggml has no ARM CPU kernel for BF16 at all (ggml_vec_dot_bf16 has
+// AVX512BF16/AVX512F/AVX2/RISC-V/POWER9 paths and nothing for aarch64), and
+// ggml_compute_forward_flash_attn_ext_f16 gates its fast split-KV and tiled paths on
+// `k->type == F32 || k->type == F16`. BF16 forfeits both.
+#define MOSHI_CACHE_TYPE GGML_TYPE_F16
 
 moshi_kv_cache_state_t * moshi_kv_cache_state(
         StateContext * state_ctx,
@@ -161,13 +170,8 @@ moshi_kv_cache_state_t * moshi_kv_cache_state(
         int batch_size ) {
     auto states = new moshi_kv_cache_state_t;
     NE ne = { dim_per_head, capacity, num_heads, batch_size };
-#ifdef CACHE_BF16
-    state_ctx->fill16( ne, GGML_TYPE_BF16, 0, &states->keys );
-    state_ctx->fill16( ne, GGML_TYPE_BF16, 0, &states->values );
-#else
-    state_ctx->fill( ne, 0.f, &states->keys );
-    state_ctx->fill( ne, 0.f, &states->values );
-#endif
+    state_ctx->fill16( ne, MOSHI_CACHE_TYPE, 0, &states->keys );
+    state_ctx->fill16( ne, MOSHI_CACHE_TYPE, 0, &states->values );
     return states;
 }
 
@@ -193,9 +197,7 @@ std::tuple<ggml_tensor*,ggml_tensor*> moshi_kv_cache_insert_kv(
         keys->nb[3],
         keys->nb[1] * index
     );
-#ifdef CACHE_BF16
-    k = ggml_cast( ctx, k, GGML_TYPE_BF16 );
-#endif
+    k = ggml_cast( ctx, k, MOSHI_CACHE_TYPE );
     cache_0_0 = ggml_cpy( ctx, k, cache_0_0 );
     keys = ggml_view_4d( ctx, cache_0_0,
         keys->ne[0], // D
@@ -218,9 +220,7 @@ std::tuple<ggml_tensor*,ggml_tensor*> moshi_kv_cache_insert_kv(
         values->nb[3],
         values->nb[1] * index
     );
-#ifdef CACHE_BF16
-    v = ggml_cast( ctx, v, GGML_TYPE_BF16 );
-#endif
+    v = ggml_cast( ctx, v, MOSHI_CACHE_TYPE );
     cache_1_0 = ggml_cpy( ctx, v, cache_1_0 );
     values = ggml_view_4d( ctx, cache_1_0,
         values->ne[0], // D
@@ -563,17 +563,8 @@ ggml_tensor * moshi_streaming_multihead_attention(
     assert( attn_bias || ! attn->causal );
 
     //x = nn.functional.scaled_dot_product_attention(q, k, v, attn_bias, dropout_p=0.0)
-    auto x = torch_nn_functional_scaled_dot_product_attention_custom( ctx,
-        q, k, v, attn_bias );//, dropout_p=0.0);
-
     //x = rearrange(x, "b h t d -> b t (h d)")
-    // b h t d -> b t h d
-    auto x2 = ggml_cont( ctx, ggml_permute( ctx, x, 0, 2 ,1 ,3 ) );
-    // b t h d -> b t (h d)
-    x = ggml_reshape_3d( ctx, x2,
-        x2->ne[0] * x2->ne[1],
-        x2->ne[2],
-        x2->ne[3] );
+    auto x = torch_sdpa_rearranged( ctx, q, k, v, attn_bias );
 
     x = moshi_apply_weights_per_step_linear( ctx,
         attn->out_projs, attn->weights_per_step_schedule,
@@ -694,17 +685,8 @@ ggml_tensor * moshi_streaming_multihead_attention(
     assert( attn_bias || ! attn->causal );
 
     //x = nn.functional.scaled_dot_product_attention(q, k, v, attn_bias, dropout_p=0.0)
-    auto x = torch_nn_functional_scaled_dot_product_attention_custom( ctx,
-        q, k, v, attn_bias );//, dropout_p=0.0);
-
     //x = rearrange(x, "b h t d -> b t (h d)")
-    // b h t d -> b t h d
-    auto x2 = ggml_cont( ctx, ggml_permute( ctx, x, 0, 2 ,1 ,3 ) );
-    // b t h d -> b t (h d)
-    x = ggml_reshape_3d( ctx, x2,
-        x2->ne[0] * x2->ne[1],
-        x2->ne[2],
-        x2->ne[3] );
+    auto x = torch_sdpa_rearranged( ctx, q, k, v, attn_bias );
 
     x = torch_nn_linear( ctx, attn->out_projs[0], x );
 
@@ -744,17 +726,8 @@ ggml_tensor * moshi_streaming_multihead_cross_attention(
     q = ggml_permute( ctx, q, 0, 2, 1, 3 );
 
     //x = nn.functional.scaled_dot_product_attention(q, k, v, attn_bias, dropout_p=0.0)
-    auto x = torch_nn_functional_scaled_dot_product_attention_custom( ctx,
-        q, k, v, NULL );//, dropout_p=0.0);
-
     //x = rearrange(x, "b h t d -> b t (h d)")
-    // b h t d -> b t h d
-    auto x2 = ggml_cont( ctx, ggml_permute( ctx, x, 0, 2 ,1 ,3 ) );
-    // b t h d -> b t (h d)
-    x = ggml_reshape_3d( ctx, x2,
-        x2->ne[0] * x2->ne[1],
-        x2->ne[2],
-        x2->ne[3] );
+    auto x = torch_sdpa_rearranged( ctx, q, k, v, NULL );
 
     x = torch_nn_linear( ctx, attn->out_projs[0], x );
 

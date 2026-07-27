@@ -177,25 +177,33 @@ void create_bias_pattern(
     auto & tensor = pattern.tensor;
     int start = capacity * 2 - t;
     int width = start + capacity;
-    tensor.new_tensor( GGML_NE( width, t ), GGML_TYPE_F32, backend );
+    // F16, not F32. ggml_soft_max_ext accepts either, but
+    // ggml_compute_forward_flash_attn_ext_f16 reads the mask as ggml_fp16_t
+    // unconditionally (ops.cpp: `const ggml_fp16_t * mp = ...`) while
+    // ggml_flash_attn_ext asserts only ggml_is_contiguous(mask) — so an F32 mask is
+    // silently reinterpreted as F16 and produces garbage. Both consumers are happy
+    // with F16; only one is happy with F32. -INFINITY is representable in F16.
+    tensor.new_tensor( GGML_NE( width, t ), GGML_TYPE_F16, backend );
     pattern.capacity = capacity;
     pattern.t = t;
     pattern.start = start;
     auto nelements = ggml_nelements( tensor );
-    std::vector<float> values( nelements );
+    std::vector<ggml_fp16_t> values( nelements );
+    const ggml_fp16_t f16_hi = ggml_fp32_to_fp16( hi );
+    const ggml_fp16_t f16_lo = ggml_fp32_to_fp16( lo );
     for ( int j = 0; j < t; j++ ) {
         int toff = j * width;
         int right = start + 1 + j;
         for ( int i = 0; i < right; i++ ) {
-            values[ toff + i ] = hi;
+            values[ toff + i ] = f16_hi;
         }
         for ( int i = right; i < width; i++ ) {
-            values[ toff + i ] = lo;
+            values[ toff + i ] = f16_lo;
         }
         int b = t - j - 1;
         toff += capacity - 1;
         for ( int i = 0; i < b; i++ ) {
-            values[ toff - i ] = lo;
+            values[ toff - i ] = f16_lo;
         }
     }
     ggml_backend_tensor_set( tensor, values.data(), 0, ggml_nbytes( tensor ) );
@@ -236,16 +244,59 @@ ggml_tensor * bias_pattern_index(
     return cont;
 }
 
-ggml_tensor * torch_nn_functional_scaled_dot_product_attention_custom(
+// Set to 0 to fall back to the manual softmax(QK^T)V path (for A/B).
+#ifndef MOSHI_USE_FLASH_ATTN
+#define MOSHI_USE_FLASH_ATTN 1
+#endif
+
+// scaled_dot_product_attention immediately followed by the "b h t d -> b t (h d)"
+// rearrange that every call site performed identically.
+//
+// Fusing them is what makes flash attention worth it here: ggml_flash_attn_ext emits
+// [DV, H, T, B], which is exactly what that rearrange produces, so the flash path is
+// a bare reshape while the manual path needs a permute + ggml_cont.
+//
+// The manual path also had to do `ggml_cont(ggml_transpose(value))` because ggml_mul_mat
+// structurally requires V^T (result[n,m] = sum_k a[k,n] b[k,m]). With a [D, capacity]
+// cache and capacity=750 that transposes the ENTIRE cache on every frame, in every
+// layer: nb00 != type_size and dst contiguous sends it down the strided branch of
+// ggml_compute_forward_dup_bytes that ggml itself comments "this is not optimal - fix
+// me", i.e. 2-byte memcpys — ~49 MB of traffic per frame across 16 layers, plus the
+// scratch to hold it. ggml_flash_attn_ext consumes V untransposed and fuses the softmax,
+// so all of that disappears.
+ggml_tensor * torch_sdpa_rearranged(
         ggml_context * ctx,
         ggml_tensor * query,
         ggml_tensor * key,
         ggml_tensor * value,
         ggml_tensor * attn_bias ) {
-    float scale_factor = 1.f / sqrtf( (float) query->ne[0] );
+    const float scale_factor = 1.f / sqrtf( (float) query->ne[0] );
+
+#if MOSHI_USE_FLASH_ATTN
+    // ggml_flash_attn_ext requires dim-0-contiguous q/k/v and a contiguous mask.
+    const bool flash_ok =
+        query->type == GGML_TYPE_F32 &&
+        key->type == value->type &&
+        query->nb[0] == ggml_type_size( query->type ) &&
+        key->nb[0]   == ggml_type_size( key->type )   &&
+        value->nb[0] == ggml_type_size( value->type ) &&
+        // ggml_flash_attn_ext does NOT assert the mask dtype but its CPU kernel reads
+        // it as ggml_fp16_t regardless, so an F32 mask silently yields garbage.
+        ( !attn_bias || ( ggml_is_contiguous( attn_bias ) &&
+                          attn_bias->type == GGML_TYPE_F16 ) );
+    if ( flash_ok ) {
+        // [DV, H, T, B] — already the rearranged layout
+        auto x = ggml_flash_attn_ext( ctx, query, key, value, attn_bias,
+                                      scale_factor, 0.0f, 0.0f );
+        return ggml_reshape_3d( ctx, x, x->ne[0] * x->ne[1], x->ne[2], x->ne[3] );
+    }
+#endif
+
     auto attn_weight = ggml_mul_mat( ctx, key, query );
     attn_weight = ggml_soft_max_ext( ctx, attn_weight, attn_bias, scale_factor, 0.0f );
     value = ggml_cont( ctx, ggml_transpose( ctx, value ) );
-    auto x = ggml_mul_mat( ctx, value, attn_weight );
-    return x;
+    auto x = ggml_mul_mat( ctx, value, attn_weight );   // [D, T, H, B]
+    // b h t d -> b t h d -> b t (h d)
+    auto x2 = ggml_cont( ctx, ggml_permute( ctx, x, 0, 2, 1, 3 ) );
+    return ggml_reshape_3d( ctx, x2, x2->ne[0] * x2->ne[1], x2->ne[2], x2->ne[3] );
 }
