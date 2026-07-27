@@ -211,7 +211,21 @@ ggml_tensor * bias_pattern_index(
     if ( offset <= pattern.capacity )
         offset = pattern.start - offset;
     else
-        offset = pattern.capacity - ( offset % pattern.capacity );
+        // The wrapped branch must subtract the block width, exactly as the unwrapped
+        // branch does: pattern.start is capacity*2 - t (create_bias_pattern), so the
+        // two formulas have to agree at offset == capacity, and without `- t` they
+        // differ by precisely t.
+        //
+        // Without it, from offset == capacity+1 onward each step is denied the slot
+        // holding the immediately preceding block and allowed a slot that set_rows has
+        // already overwritten with the *current* block -- a lookahead of t frames.
+        //
+        // Only bites when t > 1. For t == 1 the window equals the capacity, so once the
+        // ring is full every slot is legitimately in range and the mask is all-ones;
+        // any offset into the all-hi region happens to be correct. That is why the LM
+        // (t=1, capacity=750) is unaffected while the Mimi encoder and decoder
+        // (t=2, capacity=250) are wrong from ~10 s of audio onward.
+        offset = pattern.capacity - ( offset % pattern.capacity ) - pattern.t;
     auto view = ggml_view_2d( ctx,
         tensor,
         pattern.capacity,
