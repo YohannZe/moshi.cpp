@@ -89,6 +89,116 @@ Headroom, not just parity, is required — hence P2.
 
 ---
 
+## P2 — RVQ search by matvec (2026-07-27)
+
+`moshi_EuclideanCodebook_encode` materialised the full [D, card] difference matrix per
+codebook — `repeat_4d(x)` + `repeat_4d(embedding)` + `sub` + `mul` + `sum_rows`. At
+card=2048, D=256 that is ~2 MiB per intermediate and ~18 MiB per codebook, times 32
+codebooks times 12.5 frames/s. `ggml_repeat_4d` always emits a REPEAT node even when the
+shape is unchanged, so the embedding repeat was a 2 MiB memcpy of **static weights** every
+frame. And `GraphContext::alloc()` uses `ggml_backend_alloc_ctx_tensors` rather than a
+gallocr, so those intermediates pinned ~256 MiB of permanently resident graph buffer.
+
+Replaced by `argmin ||x-e||² = argmax(x·e - ||e||²/2)`: one matvec plus a broadcast
+subtract, with `||e||²/2` precomputed once at graph-build time.
+
+| | Mimi ms/frame | RTF |
+|---|---|---|
+| device, before | 34.83 | 0.983 |
+| **device, after** | **13.79** | **0.685** |
+| host, before (same session) | 32.70 | 0.735 |
+| **host, after** | **10.70** | **0.459** |
+
+**Transcript identical to the character.** Also numerically better than what it replaced:
+the old code turned argmin into argmax via `1/(1+d)`, whose derivative `-dd/(1+d)²`
+collapses distance gaps below ~2e-6 into F32 rounding at the d≈50 typical here — exactly
+the near-tie regime that decides centroid choice — and inherited
+`ggml_vec_argmax_f32`'s last-maximum tie-break where `torch.argmin` takes the first.
+
+## P3 — attention mask fix (2026-07-27)
+
+`bias_pattern_index` omitted the block width `t` in its wrapped branch, so from
+`offset == capacity+1` onward each step was denied the slot holding the preceding block
+and allowed a slot already overwritten with the *current* block: a `t`-frame lookahead.
+Only bites for `t > 1`, which is why the Mimi transformers (t=2, capacity=250) were wrong
+from ~10 s of audio while the LM (t=1, capacity=750) was accidentally fine — at t=1 the
+window equals the capacity, so once the ring is full every slot is legitimately in range
+and the mask is all-ones.
+
+Measured on `test_speech_90s` (one 30 s passage × 3, so the ideal output is the 30 s
+reference × 3 and repetitions 2–3 lie entirely in the broken regime):
+
+| | words matched | word error rate |
+|---|---|---|
+| before | 273/297 | **8.08 %** |
+| **after** | **297/297** | **0.00 %** |
+
+Speed unaffected. This is why the 90 s fixture exists.
+
+## P4/P5 — KV cache F16 + flash attention (2026-07-27)
+
+KV cache BF16 → F16: LM 24.71 → 23.48 ms/frame on host, and the transcript got *better*
+(583 vs 546 chars; "d'abord dans des investissements dans les infrastructures" correct
+where BF16 gave "dans les investissements, dans les infrastructures"). 10 mantissa bits
+against 7, at the same 2 bytes.
+
+Flash attention: **~2 %** (lm_ms 9492 → 9308, same session, identical text) — **not** the
+10–40 ms an earlier derived estimate suggested. The V-cache transpose is ~98 MB/frame
+across 16 layers ≈ 1.2 GB/s at 12.5 fps, a few percent of a 34 GB/s bus. The estimate was
+simply wrong; kept the change for the correctness guard, fewer nodes and simpler call
+sites.
+
+⚠️ **ggml footgun found here.** `ggml_flash_attn_ext` asserts only
+`ggml_is_contiguous(mask)`, but its CPU kernel reads the mask as `ggml_fp16_t`
+unconditionally. Passing the existing F32 mask produced garbage **silently** — and
+garbage that ran **45 % faster** (RTF 0.291 vs 0.448), because the reinterpreted bytes
+looked like `-inf` so the kernel skipped most positions. Only comparing transcripts caught
+it: 388 characters of pure whitespace. `create_bias_pattern` now emits F16 and the flash
+path asserts the dtype itself.
+
+## The LM is now bandwidth-bound on its own weights
+
+Host LM time against matmul bytes per parameter, all else equal:
+
+| quant | B/param | bytes vs Q4_K | LM ms | time vs Q4_K |
+|---|---|---|---|---|
+| Q4_K | 0.5625 | 1.00 | 25.01 | 1.00 |
+| Q8_0 | 1.0625 | 1.89 | 47.54 | **1.90** |
+| F16 | 2.0 | 3.56 | 69.60 | 2.78 |
+
+Q8_0 predicted 1.89x, measured 1.90x. 839 M matmul params at Q4_K is ~472 MB/frame, i.e.
+~18.9 GB/s at 25 ms. **Further LM gains therefore need either fewer bytes (quality cost)
+or better kernels per byte** — not graph restructuring.
+
+## Reverted: repack buffer type — and a measurement lesson
+
+Routing weights through `ggml_backend_dev_get_extra_bufts` (the CPU repack buffer, which
+rewrites quantized weights into the blocked layouts the wide i8mm/dotprod GEMM kernels
+want) looked like a 14 % win on Q4_K. **It was not measured.** The A/B passed
+`MOSHI_NO_REPACK=` (empty) for the "on" arm, and `getenv()` returns non-NULL for an empty
+value, so repack was disabled in *both* arms — the 14 % was noise between two identical
+configurations. Exactly the failure mode this branch opened by fixing upstream's silent
+`-q` no-op. Guard on the value, not on presence.
+
+Once genuinely enabled it **segfaults**, including with F16 weights repack should not
+touch. Most likely an interaction with P2: `moshi_EuclideanCodebook_half_sqnorm` calls
+`ggml_backend_tensor_get` on the codebook embedding, and a repack buffer does not
+necessarily support reading back. Reverted rather than debugged, because the payoff is an
+aarch64 story (x86 gets AVX either way) and the device was disconnected. **Worth
+revisiting on device**, moving the codebook read off the repack path first.
+
+## Status — host, all fixtures, Q4_K
+
+| fixture | RTF | chars | expected |
+|---|---|---|---|
+| `test_16k` (30 s speech) | 0.571 | 583 | — |
+| `test_speech_90s` | **0.498** | **1735** | ≈3×583, no blackout ✅ |
+| `test_speech_music` | 0.506 | 574 | no regression ✅ |
+| `test_music` | 0.536 | **0** | no hallucination ✅ |
+
+Device figures are from before P3/P4/P5 (USB dropped mid-session): **RTF 0.685** after P1+P2,
+against Voxtral's 1.40. The post-P4/P5 device numbers and peak RSS still need taking.
+
 ## Reproducing
 
 ```
