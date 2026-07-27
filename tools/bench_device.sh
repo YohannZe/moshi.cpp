@@ -22,10 +22,17 @@ shift
 WEIGHTS=("$@")
 [ ${#WEIGHTS[@]} -eq 0 ] && WEIGHTS=("")
 
-temp_mc() { "$ADB" shell 'cat /sys/class/thermal/thermal_zone0/temp' | tr -dc '0-9'; }
+temp_mc() { "$ADB" shell 'cat /sys/class/thermal/thermal_zone0/temp' 2>/dev/null | tr -dc '0-9'; }
+
+require_device() {
+  "$ADB" shell true >/dev/null 2>&1 && return 0
+  echo "error: no device (adb devices shows nothing). Reconnect USB and re-authorize." >&2
+  exit 1
+}
 
 cooldown() {
   local t waited=0
+  require_device      # else the loop below spins forever on an empty temp
   t=$(temp_mc)
   while [ -n "$t" ] && [ "$t" -ge "$COOL_MC" ] && [ "$waited" -lt "$COOL_MAX_S" ]; do
     printf '\r  cooling: %d C (target < %d C, %ds elapsed)   ' \

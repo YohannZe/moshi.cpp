@@ -232,10 +232,41 @@ public:
         gguf_write_to_file( gguf, filename, false );
     }
 
+    // Allocate weights in the backend device's "extra" buffer type when it offers one.
+    //
+    // On the CPU backend that is the repack buffer type, which intercepts
+    // ggml_backend_tensor_set and rewrites quantized weights into the blocked layouts
+    // the wide GEMM kernels want (q4_0_4x8 / q4_0_8x8 / q4_K_8x8 ...). Those kernels are
+    // where aarch64 i8mm and dotprod actually get used; a plain
+    // ggml_backend_alloc_ctx_tensors lands in the default buffer, where repack never
+    // engages and the matmuls fall back to the narrow path.
+    //
+    // Types the repack buffer does not handle pass through unchanged, so it is safe for
+    // the F32 norms and the F16 lookup tables sharing this context.
+    // Set MOSHI_NO_REPACK=1 to disable and A/B.
+    ggml_backend_buffer_t alloc_weights( ggml_context * c ) {
+        if ( !getenv( "MOSHI_NO_REPACK" ) ) {
+            auto dev = ggml_backend_get_device( backend );
+            if ( dev ) {
+                auto reg = ggml_backend_dev_backend_reg( dev );
+                auto get_extra_bufts = (ggml_backend_dev_get_extra_bufts_t)
+                    ggml_backend_reg_get_proc_address( reg, "ggml_backend_dev_get_extra_bufts" );
+                if ( get_extra_bufts ) {
+                    auto bufts = get_extra_bufts( dev );
+                    for ( ; bufts && *bufts; bufts++ ) {
+                        auto buf = ggml_backend_alloc_ctx_tensors_from_buft( c, *bufts );
+                        if ( buf ) return buf;
+                    }
+                }
+            }
+        }
+        return ggml_backend_alloc_ctx_tensors( c, backend );
+    }
+
     bool load_gguf() {
 
         assert( backend );
-        buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        buffer = alloc_weights( ctx );
 
         auto f = fopen( filename.c_str(), "rb" );
 
@@ -292,7 +323,7 @@ public:
         }
         alloc_requests.clear();
         if (backend)
-            buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+            buffer = alloc_weights( ctx );
     }
 
     void init() {
