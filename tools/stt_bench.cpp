@@ -7,10 +7,17 @@
 // Mirrors voxtral.cpp/tools/test_stream.cpp so results are directly comparable:
 // same fixtures, same RESULT line, same RTF definition (compute_ms / audio_ms).
 //
-// usage: stt_bench <model_dir> <audio.wav> [threads] [quant]
-//   model_dir  dir holding config.json (mimi + tokenizer resolved relative to it)
-//   audio.wav  16-bit PCM mono WAV, any sample rate (resampled to 24 kHz)
-//   quant      q8_0 | q4_k | q4_0  (omit for the model's native precision)
+// usage: stt_bench <model_dir> <audio.wav> [threads] [model_gguf]
+//   model_dir   dir holding config.json (mimi + tokenizer resolved relative to it)
+//   audio.wav   16-bit PCM mono WAV, any sample rate (resampled to 24 kHz)
+//   model_gguf  weights file inside model_dir, overriding config.json's
+//               moshi_name. Use this to A/B quantizations produced by
+//               tools/requantize_gguf.
+//
+// NOTE: there is deliberately no `quant` option. moshi_lm_quantize() is a silent
+// no-op for GGUF inputs (src/loader.h fetch() returns get_tensor() without ever
+// consulting dst_type/qtype), so passing "-q q4_k" against a GGUF measures the
+// file's existing types and nothing else. Quantize offline instead.
 
 #include <cstdio>
 #include <cstdlib>
@@ -92,13 +99,13 @@ static std::string detok(const std::string& piece) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <model_dir> <audio.wav> [threads] [quant]\n", argv[0]);
+        fprintf(stderr, "usage: %s <model_dir> <audio.wav> [threads] [model_gguf]\n", argv[0]);
         return 1;
     }
     std::string model_dir = argv[1];
     const char* audio_path = argv[2];
     const int threads = argc > 3 ? atoi(argv[3]) : 6;
-    const char* quant  = argc > 4 ? argv[4] : nullptr;
+    const char* model_override = argc > 4 ? argv[4] : nullptr;
     if (!model_dir.empty() && model_dir.back() != '/') model_dir += '/';
 
     std::vector<float> audio_in; int in_rate = 0;
@@ -133,12 +140,9 @@ int main(int argc, char** argv) {
     moshi_context_t* moshi = moshi_alloc(backend, backend);
 
     auto t0 = std::chrono::steady_clock::now();
-    const std::string lm_path  = model_dir + cfg.moshi_name;
+    const std::string lm_path = model_dir + (model_override ? model_override : cfg.moshi_name);
     moshi_lm_t* lm = moshi_lm_from_files(moshi, &cfg, lm_path.c_str());
     if (!lm) { fprintf(stderr, "failed to open %s\n", lm_path.c_str()); return 1; }
-    if (quant && !moshi_lm_quantize(lm, quant)) {
-        fprintf(stderr, "unknown quant %s\n", quant); return 1;
-    }
     moshi_lm_gen_t* gen = moshi_lm_generator(lm);
 
     const std::string tok_path  = model_dir + cfg.tokenizer_name;
@@ -149,7 +153,7 @@ int main(int argc, char** argv) {
 
     if (moshi_lm_load(lm) != 0) { fprintf(stderr, "failed to load weights\n"); return 1; }
     const double load_ms = elapsed_ms(t0);
-    printf("load: %.0f ms%s\n", load_ms, quant ? " (incl. quantize)" : "");
+    printf("load: %.0f ms  (%s)\n", load_ms, lm_path.c_str());
 
     const float frame_rate = mimi_frame_rate(codec);
     const int frame_size = mimi_frame_size(codec);
@@ -227,10 +231,10 @@ int main(int argc, char** argv) {
     printf("  lm (1B)     : %.2f ms/frame (%.0f%% of compute)\n",
            lm_ms / total_frames, 100.0 * lm_ms / compute_ms);
     printf("full text: %s\n", full_text.c_str());
-    printf("RESULT engine=kyutai-stt-1b audio=%s threads=%d quant=%s "
+    printf("RESULT engine=kyutai-stt-1b audio=%s threads=%d weights=%s "
            "load_ms=%.0f compute_ms=%.0f mimi_ms=%.0f lm_ms=%.0f "
            "audio_ms=%.0f rtf=%.3f chars=%zu\n",
-           audio_path, threads, quant ? quant : "native",
+           audio_path, threads, model_override ? model_override : cfg.moshi_name.c_str(),
            load_ms, compute_ms, mimi_ms, lm_ms, audio_sec * 1000.0,
            compute_ms / (audio_sec * 1000.0), full_text.size());
     return 0;

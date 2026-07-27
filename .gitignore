@@ -17,3 +17,8 @@ bin/mimi-encode
 bin/mimi-play
 bin/moshi-stt
 bin/moshi-tts
+
+# local model cache (see tools/Codes4Fun_*.txt for download lists)
+models/
+build/
+build-android/
