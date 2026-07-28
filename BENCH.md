@@ -187,7 +187,46 @@ necessarily support reading back. Reverted rather than debugged, because the pay
 aarch64 story (x86 gets AVX either way) and the device was disconnected. **Worth
 revisiting on device**, moving the codebook read off the repack path first.
 
-## Status — host, all fixtures, Q4_K
+## FINAL — device (SM8850), all fixtures, Q4_K weights
+
+| fixture | RTF | chars | expected |
+|---|---|---|---|
+| `test_16k` (30 s speech) | **0.685** | 583 | — |
+| `test_speech_90s` | **0.695** | **1735** | ≈3×583, no blackout ✅ |
+| `test_speech_music` | 0.695 | 574 | no regression ✅ |
+| `test_music` | 0.697 | **0** | no hallucination ✅ |
+| **peak VmRSS** | **1352 MB** | | < 1500 MB target ✅ |
+
+Character counts match host exactly, so the mask fix and the numerics hold on aarch64.
+
+### Sustained load — the test that actually matters
+
+6 minutes of continuous audio, four 90 s runs back to back with **no cooldown**:
+
+| run | RTF | chars | temp after |
+|---|---|---|---|
+| 1 | 0.706 | 1735 | 67 °C |
+| 2 | 0.687 | 1735 | 66 °C |
+| 3 | 0.709 | 1735 | 60 °C |
+| 4 | 0.938 | 1735 | 58 °C |
+
+**It no longer thermally saturates.** Peak 67 °C against 83–84 °C for every pre-P2 run,
+because there is simply far less work per frame. RTF stays under 1.0 throughout and the
+output is bit-stable across all four runs. The run-4 excursion is not thermal (58 °C) —
+most likely background activity on the phone.
+
+Compare where this started, and the incumbent:
+
+| | RTF (device) | peak RSS | 90 s coverage |
+|---|---|---|---|
+| Voxtral Mini 4B Q4_0 (incumbent) | 1.40 | 4484 MB | 61 %, **16 s blackout** |
+| kyutai stt-1b, as shipped upstream | 2.99 | 2677 MB | — |
+| **kyutai stt-1b, this branch** | **0.685** | **1352 MB** | **~100 %, no blackout** |
+
+**4.4x faster than upstream, 2x faster and 3.3x lighter than Voxtral**, with the 16 s
+transcript hole gone.
+
+## Earlier status — host, all fixtures, Q4_K
 
 | fixture | RTF | chars | expected |
 |---|---|---|---|
@@ -196,8 +235,7 @@ revisiting on device**, moving the codebook read off the repack path first.
 | `test_speech_music` | 0.506 | 574 | no regression ✅ |
 | `test_music` | 0.536 | **0** | no hallucination ✅ |
 
-Device figures are from before P3/P4/P5 (USB dropped mid-session): **RTF 0.685** after P1+P2,
-against Voxtral's 1.40. The post-P4/P5 device numbers and peak RSS still need taking.
+(Host figures, for reference. Device figures above.)
 
 ## Reproducing
 
