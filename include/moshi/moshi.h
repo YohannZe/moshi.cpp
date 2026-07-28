@@ -6,8 +6,6 @@
 
 #include <deque>
 
-#include <sentencepiece_processor.h>
-
 #include "ptrs.h"
 #include "safetensor.h"
 

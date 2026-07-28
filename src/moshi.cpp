@@ -5,6 +5,7 @@
 #include <iostream>
 
 #define MOSHI_BUILD
+#include <sentencepiece_processor.h>
 #include <moshi/moshi.h>
 
 // for src/context.h
@@ -861,6 +862,17 @@ int moshi_lm_personaplex_system_prompt(
 }
 
 void moshi_lm_start( moshi_context_t * moshi, moshi_lm_gen_t * gen, float depth_temperature, float text_temperature, bool logging ) {
+    // NOT re-entrant: state_ctx, machine, lm_states, lmgen_state and ctx are all raw
+    // pointers overwritten below, so a second call leaks all of them -- for stt-1b that
+    // is ~100 MB of KV cache per call. Callers wanting to restart a stream should
+    // recreate the generator, or (for a streaming model like STT, which has a sliding
+    // window and needs no periodic reset) simply keep one generator alive and reset only
+    // the Mimi encoder. Made loud rather than fixed here because freeing the other four
+    // safely needs an audit of their ownership that this change does not cover.
+    if ( gen->state_ctx ) {
+        fprintf( stderr, "moshi_lm_start: called twice on the same generator; "
+                         "leaking the previous state (~100 MB for stt-1b)\n" );
+    }
     const int max_padding = 8;
     const int initial_padding = 2;
     const int second_stream_ahead = gen->lm->second_stream_ahead;
