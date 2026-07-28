@@ -326,3 +326,64 @@ independently of the negative result:
 2. `iface.get_tensor` was left null, so any `ggml_backend_tensor_get` on a tensor in this
    buffer jumped to address 0. Implemented symmetrically: memcpy for un-repacked tensors,
    and an assert for repacked ones, whose layout genuinely cannot be read back.
+
+---
+
+## Batching is nearly free on this CPU — measured, and it redirects the strategy
+
+`tools/bench_batch.cpp` times the LM's real weight shapes in isolation from moshi.cpp, to
+test the load-bearing assumption behind speculation before building any of it.
+
+Device (SM8850, cooled, q4_K, 6 threads, 200 iters), one transformer layer:
+
+| shape | batch1 | batch2 | batch4 | b2/b1 |
+|---|---|---|---|---|
+| `self_attn.in_proj [2048x6144]` | 0.835 | 0.937 | 0.966 | 1.12 |
+| `self_attn.out_proj [2048x2048]` | 0.359 | 0.320 | 0.507 | 0.89 |
+| `gating.linear_in [2048x8448]` | **1.293** | **0.788** | 0.838 | **0.61** |
+| `gating.linear_out [4224x2048]` | 0.482 | 0.548 | 0.608 | 1.14 |
+| **TOTAL** | **2.968** | **2.593** | **2.920** | **0.87** |
+
+**Four frames cost the same as one.** And batch 2 is *cheaper in absolute terms* than batch 1
+— `gating.linear_in` is 40 % faster at batch 2 for identical weights. So this is not only the
+weight-load amortization predicted earlier: at batch 1 ggml takes a **matvec** path, and at
+batch >= 2 it switches to a properly vectorized matmul kernel. The earlier ~28 % estimate was
+too conservative.
+
+### Consequence: batch-4 speculation with prefix acceptance, not batch-2
+
+Speculate the next N-1 text tokens as padding, run one batch-N pass, then accept the longest
+correct prefix. Frame t is *always* correct — the mask is causal, so position t cannot see the
+speculated positions. Frame t+k is correct iff every output before it was padding.
+
+    E[accepted frames per pass] = 1 + P(pad) + P(2 pad) + P(3 pad)
+                                = 1 + 0.554 + 0.405 + 0.293 = 2.252
+    cost/frame = 2.920 / 2.252 = 1.297 ms   vs 2.968 unbatched   =>  -56%
+
+Batch 2 by comparison: 0.554x2.593 + 0.446x(2.593+2.968) = 3.917 ms per 2 frames vs 5.936,
+i.e. **-34 %**. Batch 4 wins because the pass is nearly free while acceptance decays slowly —
+padding runs average 3.70 frames.
+
+Projected: LM matmul time -56 % => device RTF 0.702 -> ~0.45, in-app 0.92 -> ~0.60.
+
+### Why rollback is nearly free (the design insight)
+
+The autoregressive dependency is a single integer: `state->cache[position][0] = text_token`
+(`lm.h:937`) is the only thing frame t+1 inherits from frame t. And the KV cache is a ring
+written by `ggml_set_rows` at `(offset+i) % capacity`. So rejecting speculated frames means
+**not advancing `state->offset`** — the next real pass overwrites those slots. No undo, no
+copy, no bookkeeping.
+
+### What remains (not implemented)
+
+1. A second graph built for T=N. The embedding path is structurally T=1: each codebook is a
+   `get_rows` with one scalar index (`moshi_lmmodel_text_token_embed_step`, `lm.h:586`), summed
+   into one `[dim]` vector. It needs N indices producing `[dim, N]`.
+2. Per-T bias patterns. `create_bias_pattern` stores the pattern on the *model*
+   (`moshi_streaming_transformer_t::pattern`), and `own_ctx_tensor::new_tensor` frees the
+   previous one — so a T=1 and a T=N graph coexisting would free each other's mask. This is a
+   real lifetime bug that only shows up once a second T exists.
+3. The speculate / verify / accept-prefix loop, and advancing `offset` by the accepted count.
+
+Estimated a few hours of careful surgery in a codebase that has already yielded two lifetime
+bugs. The premise and the design are validated; the implementation is not started.
