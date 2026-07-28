@@ -2,6 +2,11 @@
 
 #include <deque>
 
+// Largest speculation width the token cache is sized for. See moshi_lmgen_step_batch.
+#ifndef MOSHI_MAX_SPEC_N
+#define MOSHI_MAX_SPEC_N 8
+#endif
+
 class TokenIds {
 public:
     int card;
@@ -418,6 +423,16 @@ struct moshi_lmmodel_states_t {
     GraphContext * depformer_gctx = NULL;
     lmmodel_depformer_embed_t depformer_embed;
     ggml_tensor * depformer_tokens;
+
+    // One entry per speculation width. Separate from gctx because the embeddings, the
+    // sampler output and the VAD head all change shape with T.
+    struct batch_graph_t {
+        GraphContext * ctx = NULL;
+        lmmodel_embed_t embed;
+        ggml_tensor * sampler_out = NULL;   // [n_pos] I32
+        ggml_tensor * vad_out = NULL;       // [extra_heads_dim, n_pos] F32, may be null
+    };
+    std::map<int, batch_graph_t> batch_graphs;
 };
 
 moshi_lmmodel_states_t * moshi_lmmodel_states( StateContext * state_ctx,
@@ -682,9 +697,11 @@ std::tuple<ggml_tensor*, ggml_tensor*> moshi_lmmodel_forward_text_build(
         moshi_lmmodel_t * lm,
         moshi_lmmodel_states_t * state,
         ggml_tensor * sum_condition,
-        int n_pos = 1
+        int n_pos = 1,
+        lmmodel_embed_t * embed_override = NULL
     ) {
-    auto input = moshi_lmmodel_text_token_embed_build( ctx, lm, &state->embed, sum_condition, n_pos );
+    auto embed = embed_override? embed_override : &state->embed;
+    auto input = moshi_lmmodel_text_token_embed_build( ctx, lm, embed, sum_condition, n_pos );
 
     state->transformer_T = (int)input->ne[1];
     auto transformer_out = moshi_streaming_transformer_graph_build( ctx,
@@ -746,7 +763,12 @@ moshi_lmgen_state_t * moshi_lmgen_state( moshi_lmmodel_t * lm ) {
         0, // offset
         0, // skip
     };
-    int cache_capacity = lm->max_delay + 2;
+    // max_delay + 2 is the minimum the sequential step needs. Speculative batching indexes
+    // this ring at (offset + p) % capacity for p in [0, n_pos), plus one more slot for the
+    // last output's text token, so it needs n_pos + 1 distinct slots. With all-zero delays
+    // (this STT model) the minimum is 2, which silently aliased frames 2 and 3 onto 0 and 1
+    // for n_pos = 4. Reserve room instead: capacity x num_codebooks ints is ~1 KB.
+    int cache_capacity = std::max( lm->max_delay + 2, MOSHI_MAX_SPEC_N + 1 );
     if ( lm->personaplex )
         cache_capacity += 1;
     state->cache.resize( cache_capacity );
@@ -796,6 +818,127 @@ struct moshi_lmgen_t {
     std::deque<int> * text_prefixes;
     std::deque<std::vector<int>> * audio_prefixes;
 };
+
+// Speculative batched LM step.
+//
+// The LM does one full forward pass per 80 ms audio frame, and each pass reads all ~472 MB of
+// matmul weights, so the workload is bandwidth-bound (BENCH.md). Measured on SM8850, four
+// positions cost the same as one (2.920 vs 2.968 ms/layer) — partly weight-load amortization,
+// partly because ggml switches from a matvec path to a properly vectorized matmul at T >= 2.
+//
+// The only thing frame t+1 inherits from frame t is a single integer: the text token, written
+// to cache[position][0]. That token is padding 55.4 % of the time. So: assume every text token
+// after the first is padding, run all n_pos frames in ONE pass, then keep the longest prefix
+// that assumption held for.
+//
+// Frame 0 is always valid — the mask is causal, so position 0 cannot see the speculated
+// positions. Frame k is valid iff every output before it really was padding.
+//
+// Rollback is free. Rejected frames are undone by simply not advancing the offsets; their KV
+// slots are rewritten by the next pass before anything attends to them, because the ring
+// index is derived from the offset we just declined to advance.
+//
+// Returns the number of frames accepted (>= 1). out_text_tokens / out_vads are sized to it.
+int moshi_lmgen_step_batch(
+        ScratchContext & scratch,
+        moshi_lmgen_t * lmgen,
+        moshi_lmgen_state_t * state,
+        moshi_lmmodel_states_t * lm_states,
+        const std::vector<std::vector<int>> & audio_frames,
+        std::vector<int> & out_text_tokens,
+        std::vector<float> & out_vads
+) {
+    auto lm = lmgen->lm;
+    const int n_pos = (int) audio_frames.size();
+    const int CT = (int) state->cache.size();
+    // 3 = existing_text_padding_id in the model config, and the same value the non-batched
+    // step and the tokenizer treat as padding (TokenIds::pad, and the token filtered in
+    // stt_bench/moshi-stt).
+    const int PAD = 3;
+    assert( n_pos >= 1 );
+    assert( lm->dep_q == 0 && "batched step is the STT path only (no depformer)" );
+    // Needs n_pos distinct ring slots plus one for the last output's text token.
+    assert( n_pos + 1 <= CT && "token cache too small for this speculation width; "
+                               "raise MOSHI_MAX_SPEC_N" );
+
+    // Audio tokens are known for every frame — they come from Mimi, not from the LM — so
+    // write them all up front. delays are all zero on this model; assert rather than guess.
+    for ( int p = 0; p < n_pos; p++ ) {
+        assert( (int) audio_frames[p].size() == lm->num_codebooks - 1 );
+        for ( int i = 0; i < lm->num_codebooks - 1; i++ ) {
+            assert( lm->delays[1 + i] == 0 && "batched step assumes zero codebook delays" );
+            state->cache[(state->offset + p) % CT][1 + i] = audio_frames[p][i];
+        }
+    }
+
+    // Text inputs: position 0's is already correct (written by the previous step). The rest
+    // are the speculation.
+    for ( int p = 1; p < n_pos; p++ )
+        state->cache[(state->offset + p) % CT][0] = PAD;
+
+    std::vector<std::vector<int>> sequences( n_pos, std::vector<int>( lm->num_codebooks ) );
+    for ( int p = 0; p < n_pos; p++ ) {
+        const int pos = (state->offset + p) % CT;
+        for ( int i = 0; i < lm->num_codebooks; i++ ) {
+            const bool is_init = (state->offset + p) <= lm->delays[i];
+            sequences[p][i] = is_init? state->initial[i] : state->cache[pos][i];
+        }
+    }
+
+    auto & bg = lm_states->batch_graphs[n_pos];
+    if ( ! bg.ctx ) {
+        bg.ctx = new GraphContext( 256, scratch.backend );
+        GraphContext & g = *bg.ctx;
+        auto [transformer_out, text_logits] = moshi_lmmodel_forward_text_build(
+            g, lm, lm_states, lmgen->condition_sum, n_pos, &bg.embed );
+
+        bg.sampler_out = moshi_sample_token( g, text_logits,
+            lmgen->use_sampling, lmgen->temp_text, lmgen->top_k_text );
+        g.build_forward_expand( bg.sampler_out );
+
+        // VAD head, folded into the same graph instead of a separate dispatch.
+        if ( lm->extra_heads.size() > 2 ) {
+            auto linear = torch_nn_linear( g, lm->extra_heads[2], transformer_out );
+            bg.vad_out = ggml_soft_max( g, linear );
+            g.build_forward_expand( bg.vad_out );
+        }
+        g.alloc();
+    }
+
+    moshi_lmmodel_text_token_embed_step_batch( *bg.ctx, lm, &bg.embed, sequences );
+    moshi_streaming_transformer_graph_step( scratch, lm->transformer,
+        lm_states->transformer, n_pos );
+    scratch.compute();
+    bg.ctx->compute();
+
+    std::vector<int32_t> tokens( n_pos );
+    ggml_backend_tensor_get( bg.sampler_out, tokens.data(), 0, n_pos * 4 );
+
+    // Longest valid prefix: frame k is valid iff outputs 0..k-1 were all padding.
+    int accepted = 1;
+    while ( accepted < n_pos && tokens[accepted - 1] == PAD )
+        accepted++;
+
+    // Commit the accepted outputs; each becomes the next position's text input.
+    for ( int p = 0; p < accepted; p++ )
+        state->cache[(state->offset + p + 1) % CT][0] = tokens[p];
+
+    // Roll back what we did not accept. graph_step already advanced the transformer by
+    // n_pos, so undo the surplus; the KV slots it wrote get rewritten next pass.
+    lm_states->transformer->offset -= (n_pos - accepted);
+    state->offset += accepted;
+
+    out_text_tokens.assign( tokens.begin(), tokens.begin() + accepted );
+    out_vads.assign( accepted, 0.f );
+    if ( bg.vad_out ) {
+        const int vd = (int) bg.vad_out->ne[0];
+        std::vector<float> vad( (size_t) vd * n_pos );
+        ggml_backend_tensor_get( bg.vad_out, vad.data(), 0, vad.size() * 4 );
+        for ( int p = 0; p < accepted; p++ )
+            out_vads[p] = vad[(size_t) p * vd];
+    }
+    return accepted;
+}
 
 bool moshi_lmgen_step(
         ScratchContext & scratch,

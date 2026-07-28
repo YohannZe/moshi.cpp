@@ -21,7 +21,11 @@ ggml_tensor * moshi_rms_norm(
     if ( x->type != GGML_TYPE_F32 )
         x = ggml_cast( ctx, x, GGML_TYPE_F32 );
     auto y = ggml_rms_norm( ctx, x, norm->eps );
-    return ggml_mul( ctx, norm->alpha, y );
+    // Operand order matters: ggml_mul asserts ggml_can_repeat(b, a), i.e. only the SECOND
+    // operand may broadcast. alpha is [dim,1] and y is [dim,T], so alpha must go second or
+    // the assert fails for every T > 1 (1 % T != 0). Worked before only because T was
+    // always 1. Elementwise multiply is commutative, so this is otherwise identical.
+    return ggml_mul( ctx, y, norm->alpha );
 }
 
 void get_weights( WeightLoader * loader, std::string path, moshi_rms_norm_t * norm ) {

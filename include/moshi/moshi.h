@@ -196,6 +196,20 @@ MOSHI_API void moshi_lm_send( moshi_lm_gen_t * gen, Entry * entry );
 MOSHI_API int moshi_lm_receive( moshi_lm_gen_t * gen, int & text_token, std::vector<int16_t> & audio_tokens );
 MOSHI_API void moshi_lm_send2( moshi_lm_gen_t * gen, std::vector<int16_t> & audio_tokens );
 MOSHI_API void moshi_lm_receive2( moshi_lm_gen_t * gen, int & text_token, float & vad );
+
+// Speculative batched step: hand it up to n audio frames, get back the text tokens for the
+// leading frames whose speculation held (always >= 1). The caller advances its audio cursor
+// by the return value and calls again with the rest.
+//
+// Rationale: the LM is bandwidth-bound on its own weights, and on ARM four positions cost the
+// same as one, so the win is running several audio frames per weight load. The only
+// autoregressive dependency is the previous text token, which is padding ~55% of the time —
+// so speculate it. See BENCH.md.
+MOSHI_API int moshi_lm_step_batch(
+    moshi_lm_gen_t * gen,
+    const std::vector<std::vector<int16_t>> & audio_frames,
+    std::vector<int> & text_tokens,
+    std::vector<float> & vads );
 MOSHI_API int moshi_lm_is_active( moshi_lm_gen_t * gen );
 MOSHI_API int moshi_lm_is_empty( moshi_lm_gen_t * gen );
 MOSHI_API void moshi_lm_machine_reset( moshi_lm_gen_t * gen );

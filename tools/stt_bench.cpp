@@ -10,6 +10,7 @@
 // usage: stt_bench <model_dir> <audio.wav> [threads] [model_gguf]
 //   model_dir   dir holding config.json (mimi + tokenizer resolved relative to it)
 //   audio.wav   16-bit PCM mono WAV, any sample rate (resampled to 24 kHz)
+//   STT_SPEC_N=k  speculate k frames per LM pass (1 = off). See BENCH.md.
 //   model_gguf  weights file inside model_dir, overriding config.json's
 //               moshi_name. Use this to A/B quantizations produced by
 //               tools/requantize_gguf.
@@ -183,8 +184,15 @@ int main(int argc, char** argv) {
     printf("\n=== Streaming (%d frames + %d tail, %d threads) ===\n",
            n_frames, tail_frames, threads);
 
+    const int spec_n = getenv("STT_SPEC_N") ? std::max(1, atoi(getenv("STT_SPEC_N"))) : 1;
+    if (spec_n > 1) printf("speculation: %d frames per LM pass\n", spec_n);
+
     double compute_ms = 0, mimi_ms = 0, lm_ms = 0;
     double worst_frame_ms = 0;
+    long lm_passes = 0, spec_accepted = 0;
+    // Audio tokens for frames encoded but not yet consumed by the LM.
+    std::vector<std::vector<int16_t>> pending_frames;
+
     for (int i = 0; i < n_frames + tail_frames; i++) {
         float* frame = (i < n_frames) ? (audio.data() + (size_t)i * frame_size)
                                       : silence.data();
@@ -192,16 +200,48 @@ int main(int argc, char** argv) {
         mimi_encode_send(enc, frame);
         mimi_encode_receive(enc, tokens.data());
         const double mimi_frame_ms = elapsed_ms(tf);
+        mimi_ms += mimi_frame_ms;
+
+        int text_token = 0; float vad = 0;
+        double lm_frame_ms = 0;
+
+        if (spec_n > 1) {
+            pending_frames.push_back(tokens);
+            const bool last = (i == n_frames + tail_frames - 1);
+            if ((int)pending_frames.size() < spec_n && !last) {
+                compute_ms += mimi_frame_ms;
+                continue;   // accumulate until we have a full speculation window
+            }
+            auto tl = std::chrono::steady_clock::now();
+            while (!pending_frames.empty()) {
+                std::vector<int> toks; std::vector<float> vs;
+                const int acc = moshi_lm_step_batch(gen, pending_frames, toks, vs);
+                lm_passes++; spec_accepted += acc;
+                for (size_t k = 0; k < toks.size(); k++) {
+                    if (vs[k] > 0.5f) vad_hits++;
+                    if (toks[k] != 0 && toks[k] != 3) {
+                        full_text += detok(tokenizer_id_to_piece(tok, toks[k]));
+                        text_tokens++;
+                    }
+                }
+                pending_frames.erase(pending_frames.begin(), pending_frames.begin() + acc);
+            }
+            lm_frame_ms = elapsed_ms(tl);
+            lm_ms += lm_frame_ms;
+            compute_ms += mimi_frame_ms + lm_frame_ms;
+            worst_frame_ms = std::max(worst_frame_ms, mimi_frame_ms + lm_frame_ms);
+            continue;
+        }
+
         auto tl = std::chrono::steady_clock::now();
         moshi_lm_send2(gen, tokens);
-        int text_token = 0; float vad = 0;
         moshi_lm_receive2(gen, text_token, vad);
-        const double lm_frame_ms = elapsed_ms(tl);
-        const double frame_ms = mimi_frame_ms + lm_frame_ms;
-        mimi_ms += mimi_frame_ms;
+        lm_frame_ms = elapsed_ms(tl);
         lm_ms   += lm_frame_ms;
+        const double frame_ms = mimi_frame_ms + lm_frame_ms;
         compute_ms += frame_ms;
         worst_frame_ms = std::max(worst_frame_ms, frame_ms);
+        lm_passes++; spec_accepted++;
 
         if (vad > 0.5f) vad_hits++;
         // Dump the text-stream pattern: 0/3 are padding, anything else is a real token.
@@ -225,6 +265,10 @@ int main(int argc, char** argv) {
     printf("\n=== Results ===\n");
     printf("frames: %d (+%d tail)\n", n_frames, tail_frames);
     printf("text tokens: %d, vad frames >0.5: %d\n", text_tokens, vad_hits);
+    if (spec_n > 1)
+        printf("speculation: %ld LM passes for %ld frames = %.2f frames/pass "
+               "(ideal %d)\n", lm_passes, spec_accepted,
+               (double)spec_accepted / lm_passes, spec_n);
     printf("compute: %.0f ms for %.0f ms audio = %.3fx RT\n",
            compute_ms, audio_sec * 1000.0, compute_ms / (audio_sec * 1000.0));
     const int total_frames = n_frames + tail_frames;
@@ -236,10 +280,10 @@ int main(int argc, char** argv) {
            lm_ms / total_frames, 100.0 * lm_ms / compute_ms);
     printf("full text: %s\n", full_text.c_str());
     printf("RESULT engine=kyutai-stt-1b audio=%s threads=%d weights=%s "
-           "load_ms=%.0f compute_ms=%.0f mimi_ms=%.0f lm_ms=%.0f "
+           "spec_n=%d load_ms=%.0f compute_ms=%.0f mimi_ms=%.0f lm_ms=%.0f "
            "audio_ms=%.0f rtf=%.3f chars=%zu\n",
            audio_path, threads, model_override ? model_override : cfg.moshi_name.c_str(),
-           load_ms, compute_ms, mimi_ms, lm_ms, audio_sec * 1000.0,
+           spec_n, load_ms, compute_ms, mimi_ms, lm_ms, audio_sec * 1000.0,
            compute_ms / (audio_sec * 1000.0), full_text.size());
     return 0;
 }

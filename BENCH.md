@@ -387,3 +387,74 @@ copy, no bookkeeping.
 
 Estimated a few hours of careful surgery in a codebase that has already yielded two lifetime
 bugs. The premise and the design are validated; the implementation is not started.
+
+---
+
+## Speculative batched decoding: implemented, correct, and NOT faster on ARM
+
+`STT_SPEC_N=k` runs k audio frames per LM pass, speculating that every text token after the
+first is padding, and keeps the longest prefix that held. Default 1 (off).
+
+**Correctness: it works.** Transcript byte-identical to sequential decoding at k = 1, 2, 3, 4,
+6, 8 on the 30 s French fixture. That is a strong validation of the whole batched path.
+
+**Speed: no.**
+
+Host x86 (same session):
+
+| k | LM ms | frames/pass | chars |
+|---|---|---|---|
+| 1 | 10831 | 1.00 | 583 |
+| **2** | **9596** | 1.26 | 583 |
+| 3 | 9999 | 1.42 | 583 |
+| 4 | 10676 | 1.46 | 583 |
+| 6 | 11924 | 1.55 | 583 |
+| 8 | 13329 | 1.56 | 583 |
+
+Device (SM8850), interleaved with cooldown before every run:
+
+| k | LM ms (run 1) | LM ms (run 2) |
+|---|---|---|
+| 1 | 14721 | 14583 |
+| 2 | 14523 | 16342 |
+
+So -11 % on host at k=2, and **nothing measurable on ARM** — within a ±15 % run-to-run
+spread that persists even with cooldown.
+
+### Why the earlier -56 % projection was wrong, twice over
+
+1. **Statistical error.** The projection used marginal padding probabilities
+   (1 + 0.554 + 0.405 + 0.293 = 2.25 frames/pass). But a pass *stops* precisely because a
+   token was not padding, so the next pass systematically starts right after a non-padding
+   token — where the conditional probability of padding is well below the unconditional
+   55 %. Measured acceptance at k=4 is **1.46**, not 2.25.
+2. **The microbenchmark measured the wrong thing.** `bench_batch` timed matmuls in isolation,
+   where 4 positions genuinely cost the same as 1. The real pass also does attention over
+   750 KV positions **per query**, which grows linearly with k and turns compute-bound as k
+   rises. That is what makes k >= 3 actively worse.
+
+On ARM specifically, the q4_K matvec path is already well optimized (dotprod/i8mm), so the
+matvec→matmul kernel switch that gave 40 % on `gating.linear_in` in isolation does not survive
+integration. Third time in this work that an isolated measurement overpredicted the integrated
+result.
+
+Kept rather than reverted, unlike the repack attempt: this one is *correct* and validated, the
+per-T infrastructure is needed for any future prefill path, and if `context` were reduced from
+750 the attention term would shrink and the trade could turn. Default off.
+
+### Four latent T=1-only bugs found by building it
+
+All invisible while the LM only ever ran one position, and all fatal to anyone attempting a
+prefill or batched path:
+
+1. **`moshi_rms_norm` had its `ggml_mul` operands reversed.** `ggml_mul(alpha, y)` asserts
+   `ggml_can_repeat(y, alpha)`, i.e. only the *second* operand may broadcast. alpha is [dim,1]
+   and y is [dim,T], so `1 % T` fails for every T > 1. Worked at T=1 by coincidence.
+2. **The gating half-views were unreadable by `ggml_silu` at T > 1.** They were 4-D views
+   parking T in dim 2 with correct strides, but silu walks `ggml_nrows` rows using `nb[1]`
+   alone, so it read position p's second half as position p+1's first half. Replaced with
+   plain 2-D views made contiguous.
+3. **The token cache held only 2 time slots.** `cache_capacity = max_delay + 2`, and this model
+   has all-zero delays, so a batch of 4 aliased frames 2 and 3 onto 0 and 1 — the cause of the
+   all-padding output at k=4 that took a while to find. Now sized for `MOSHI_MAX_SPEC_N + 1`.
+4. **Masks and graph state were single-slot on the model.** Fixed in the preceding commit.

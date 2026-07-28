@@ -962,6 +962,19 @@ void moshi_lm_send2( moshi_lm_gen_t * gen, std::vector<int16_t> & audio_tokens )
         gen->audio_tokens[i] = audio_tokens[i];
 }
 
+int moshi_lm_step_batch(
+        moshi_lm_gen_t * gen,
+        const std::vector<std::vector<int16_t>> & audio_frames,
+        std::vector<int> & text_tokens,
+        std::vector<float> & vads ) {
+    std::vector<std::vector<int>> frames( audio_frames.size() );
+    for ( size_t p = 0; p < audio_frames.size(); p++ )
+        frames[p].assign( audio_frames[p].begin(), audio_frames[p].end() );
+    return moshi_lmgen_step_batch(
+        *gen->ctx, &gen->lmgen, gen->lmgen_state, gen->lm_states,
+        frames, text_tokens, vads );
+}
+
 void moshi_lm_receive2( moshi_lm_gen_t * gen, int & text_token, float & vad ) {
     moshi_lmgen_step(
         *gen->ctx,
