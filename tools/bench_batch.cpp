@@ -47,9 +47,21 @@ int main(int argc, char** argv) {
         { "gating.linear_out  [4224x2048]", 4224, 2048 },
     };
 
+    // BENCH_BACKEND=gpu picks the first non-CPU device, to compare achievable matmul
+    // throughput between the CPU and the Adreno.
     ggml_backend_load_all();
-    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
-    if (!backend) { fprintf(stderr, "no cpu backend\n"); return 1; }
+    ggml_backend_t backend = nullptr;
+    const char* want = getenv("BENCH_BACKEND");
+    if (want && !strcmp(want, "gpu")) {
+        for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+            auto dev = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) continue;
+            backend = ggml_backend_dev_init(dev, nullptr);
+            if (backend) { printf("backend: %s\n", ggml_backend_dev_name(dev)); break; }
+        }
+    }
+    if (!backend) backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (!backend) { fprintf(stderr, "no backend\n"); return 1; }
     {
         auto dev = ggml_backend_get_device(backend);
         auto reg = ggml_backend_dev_backend_reg(dev);
@@ -68,13 +80,16 @@ int main(int argc, char** argv) {
         const int batches[3] = { 1, 2, 4 };
         for (int bi = 0; bi < 3; bi++) {
             const int B = batches[bi];
-            ggml_init_params ip = { (size_t)512*1024*1024, nullptr, false };
+            ggml_init_params ip = { (size_t)16*1024*1024, nullptr, /*no_alloc*/ true };
             ggml_context * ctx = ggml_init(ip);
             ggml_tensor * w = ggml_new_tensor_2d(ctx, wtype, s.k, s.n);
             ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, s.k, B);
-            memset(w->data, 0x11, ggml_nbytes(w));
-            for (int64_t i = 0; i < ggml_nelements(x); i++) ((float*)x->data)[i] = 0.01f;
             ggml_tensor * y = ggml_mul_mat(ctx, w, x);
+            auto buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+            std::vector<uint8_t> wdata(ggml_nbytes(w), 0x11);
+            std::vector<float> xdata(ggml_nelements(x), 0.01f);
+            ggml_backend_tensor_set(w, wdata.data(), 0, wdata.size());
+            ggml_backend_tensor_set(x, xdata.data(), 0, xdata.size() * 4);
             ggml_cgraph * gf = ggml_new_graph(ctx);
             ggml_build_forward_expand(gf, y);
 
@@ -82,6 +97,7 @@ int main(int argc, char** argv) {
             const double t0 = now_ms();
             for (int i = 0; i < iters; i++) ggml_backend_graph_compute(backend, gf);
             ms[bi] = (now_ms() - t0) / iters;
+            ggml_backend_buffer_free(buf);
             ggml_free(ctx);
         }
         printf("%-34s %10.3f %10.3f %10.3f %8.2f\n",

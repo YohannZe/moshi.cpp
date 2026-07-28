@@ -49,6 +49,19 @@ struct moshi_context_t {
     ggml_backend * backend_cpu;
     own_ptr<ScratchContext> scratch_cpu;
     own_ptr<ScratchContext> scratch;
+
+    // Backend for the Mimi codec, deliberately separate from the LM's.
+    //
+    // The codec's SEANet stack uses ELU, which ggml's OpenCL backend does not implement, and
+    // moshi runs a whole graph on one backend with no scheduler to split it — so putting the
+    // codec on an accelerator fails outright. Keeping it on the CPU while the LM (pure
+    // transformer: matmul / rms_norm / silu / softmax / rope, all supported) goes to the
+    // accelerator is also the right split by cost: the LM is ~70% of a frame.
+    //
+    // Safe because the two never share tensors: mimi_encode_receive copies the RVQ codes out
+    // to host ints, and the LM takes them as host ints.
+    ggml_backend * backend_codec;
+    own_ptr<ScratchContext> scratch_codec;
 };
 
 struct mimi_codec_t {
@@ -107,6 +120,9 @@ moshi_context_t * moshi_alloc( ggml_backend * backend, ggml_backend * backend_cp
     moshi->backend = backend;
     moshi->scratch_cpu = new ScratchContext( 256, backend_cpu );
     moshi->scratch = new ScratchContext( 256, backend );
+    // The codec stays on the CPU; see backend_codec.
+    moshi->backend_codec = backend_cpu;
+    moshi->scratch_codec = new ScratchContext( 256, backend_cpu );
     return moshi;
 }
 
@@ -124,14 +140,14 @@ static void mimi_alloc( mimi_codec_t * codec, moshi_context_t * moshi,
     WeightLoader * mimi_weights;
     if ( filepath.ends_with( ".safetensors" ) ) {
         mimi_weights = WeightLoader::from_safetensor( filename,
-            moshi->scratch_cpu, moshi->backend );
+            moshi->scratch_cpu, moshi->backend_codec );
         if ( ! mimi_weights ) {
             fprintf(stderr, "error: mimi weights not found\n" );
             exit(1);
         }
     } else {
         mimi_weights = WeightLoader::from_gguf( filename,
-            moshi->scratch_cpu, moshi->backend );
+            moshi->scratch_cpu, moshi->backend_codec );
         if ( ! mimi_weights ) {
             fprintf(stderr, "error: mimi weights not found\n" );
             exit(1);
@@ -182,13 +198,13 @@ void mimi_save_gguf( mimi_codec_t * codec, const char * filepath ) {
 // MARK: Mimi Encode
 
 static void mimi_encode_alloc_context( mimi_encode_context_t * context, mimi_codec_t * codec ) {
-    auto state_ctx = new StateContext( codec->moshi->backend );
+    auto state_ctx = new StateContext( codec->moshi->backend_codec );
     auto mimi_states = moshi_mimi_encoder_states( state_ctx, codec->mimi );
     int frame_size = mimi_frame_size( codec );
 
     state_ctx->alloc();
     state_ctx->init();
-    init( codec->moshi->scratch, mimi_states, codec->mimi );
+    init( codec->moshi->scratch_codec, mimi_states, codec->mimi );
 
     context->codec = codec;
     context->state_ctx = state_ctx;
@@ -219,7 +235,7 @@ void mimi_encode_reset( mimi_encode_context_t * context ) {
     // this cannot disturb the decoder's or the LM's state.
     context->state_ctx->init();
 
-    auto scratch = context->codec->moshi->scratch.ptr;
+    auto scratch = context->codec->moshi->scratch_codec.ptr;
     auto mimi = context->codec->mimi.ptr;
     auto states = context->states.ptr;
     init( scratch, states, mimi );
@@ -230,7 +246,7 @@ void mimi_encode_send( mimi_encode_context_t * context, float * frame ) {
 }
 
 void mimi_encode_receive( mimi_encode_context_t * context, int16_t * tokens ) {
-    auto & ctx = *context->codec->moshi->scratch;
+    auto & ctx = *context->codec->moshi->scratch_codec;
     auto mimi = context->codec->mimi.ptr;
     auto states = context->states.ptr;
 
@@ -249,7 +265,7 @@ void mimi_encode_receive( mimi_encode_context_t * context, int16_t * tokens ) {
 // MARK: Mimi Decode
 
 static void mimi_decode_alloc_context( mimi_decode_context_t * context, mimi_codec_t * codec ) {
-    auto state_ctx = new StateContext( codec->moshi->backend );
+    auto state_ctx = new StateContext( codec->moshi->backend_codec );
     NE upsample_ne = {1, 512, 1, 1};
     NE decoder_ne = {2, 512, 1, 1};
     auto mimi_states = moshi_mimi_states( state_ctx, codec->mimi, upsample_ne, decoder_ne );
@@ -257,7 +273,7 @@ static void mimi_decode_alloc_context( mimi_decode_context_t * context, mimi_cod
 
     state_ctx->alloc();
     state_ctx->init();
-    init( codec->moshi->scratch, mimi_states, codec->mimi );
+    init( codec->moshi->scratch_codec, mimi_states, codec->mimi );
 
     context->codec = codec;
     context->state_ctx = state_ctx;
@@ -277,7 +293,7 @@ void unref( mimi_decode_context_t * context ) {
 }
 
 void mimi_decode_reset( mimi_decode_context_t * context ) {
-    auto scratch = context->codec->moshi->scratch.ptr;
+    auto scratch = context->codec->moshi->scratch_codec.ptr;
     auto mimi = context->codec->mimi.ptr;
     auto states = context->states.ptr;
     init( scratch, states, mimi );
@@ -290,7 +306,7 @@ void mimi_decode_send( mimi_decode_context_t * context, int16_t * tokens ) {
 }
 
 void mimi_decode_receive( mimi_decode_context_t * context, float * frame ) {
-    auto & ctx = *context->codec->moshi->scratch;
+    auto & ctx = *context->codec->moshi->scratch_codec;
     auto mimi = context->codec->mimi.ptr;
     auto states = context->states.ptr;
     mimi_decode(
@@ -821,12 +837,12 @@ int moshi_lm_personaplex_load_voice( moshi_context_t * moshi, moshi_lm_gen_t * g
     std::string ext = filename.substr(ext_index);
     if ( ext == ".safetensors" ) {
         gen->voice_weights = WeightLoader::from_safetensor( filepath,
-            moshi->scratch_cpu, moshi->backend );
+            moshi->scratch_cpu, moshi->backend_codec );
         if ( ! gen->voice_weights )
             return -1;
     } else if ( ext == ".gguf" ) {
         gen->voice_weights = WeightLoader::from_gguf( filepath,
-            moshi->scratch_cpu, moshi->backend );
+            moshi->scratch_cpu, moshi->backend_codec );
         if ( ! gen->voice_weights )
             return -1;
 

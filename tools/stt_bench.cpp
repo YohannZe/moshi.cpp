@@ -126,19 +126,37 @@ int main(int argc, char** argv) {
            (long long)cfg.dep_q, (long long)cfg.context,
            cfg.stt_config.audio_delay_seconds);
 
-    // Backend: CPU only, to match the voxtral baseline.
+    // Backend. STT_BACKEND=gpu offloads to the first non-CPU device (Adreno via OpenCL on
+    // this phone); anything else stays on CPU. moshi keeps a CPU backend alongside for ops
+    // the accelerator does not implement.
     ggml_backend_load_all();
-    ggml_backend* backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
-    if (!backend) { fprintf(stderr, "no cpu backend\n"); return 1; }
+    const char* want = getenv("STT_BACKEND");
+    const bool want_gpu = want && !strcmp(want, "gpu");
+
+    ggml_backend* backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (!backend_cpu) { fprintf(stderr, "no cpu backend\n"); return 1; }
+    ggml_backend* backend = backend_cpu;
+
+    if (want_gpu) {
+        for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+            auto dev = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) continue;
+            auto b = ggml_backend_dev_init(dev, nullptr);
+            if (b) { backend = b; printf("backend: %s\n", ggml_backend_dev_name(dev)); break; }
+        }
+        if (backend == backend_cpu)
+            fprintf(stderr, "warning: no non-CPU backend found, staying on CPU\n");
+    }
+    if (backend == backend_cpu) printf("backend: CPU\n");
     {
-        auto dev = ggml_backend_get_device(backend);
+        auto dev = ggml_backend_get_device(backend_cpu);
         auto reg = ggml_backend_dev_backend_reg(dev);
         auto set_n_threads = (ggml_backend_set_n_threads_t)
             ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
-        if (set_n_threads) set_n_threads(backend, threads);
+        if (set_n_threads) set_n_threads(backend_cpu, threads);
     }
 
-    moshi_context_t* moshi = moshi_alloc(backend, backend);
+    moshi_context_t* moshi = moshi_alloc(backend, backend_cpu);
 
     auto t0 = std::chrono::steady_clock::now();
     const std::string lm_path = model_dir + (model_override ? model_override : cfg.moshi_name);

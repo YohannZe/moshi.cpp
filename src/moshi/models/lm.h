@@ -819,6 +819,23 @@ struct moshi_lmgen_t {
     std::deque<std::vector<int>> * audio_prefixes;
 };
 
+// Greedy argmax on the host instead of in the graph.
+//
+// ggml's OpenCL backend does not implement ARGMAX, and moshi runs a whole graph on one
+// backend, so an in-graph argmax makes the LM un-offloadable. Reading back the logits costs
+// one ~32 KB transfer per frame (text_card+1 floats) against ~38 ms of compute, so this is
+// free either way and it removes a graph node.
+static int moshi_argmax_host( ggml_tensor * logits, int column = 0 ) {
+    const int64_t n = logits->ne[0];
+    std::vector<float> v( (size_t) n );
+    ggml_backend_tensor_get( logits, v.data(), (size_t) column * n * sizeof(float),
+                             (size_t) n * sizeof(float) );
+    int best = 0;
+    for ( int64_t i = 1; i < n; i++ )
+        if ( v[i] > v[best] ) best = (int) i;
+    return best;
+}
+
 // Speculative batched LM step.
 //
 // The LM does one full forward pass per 80 ms audio frame, and each pass reads all ~472 MB of
@@ -892,8 +909,8 @@ int moshi_lmgen_step_batch(
         auto [transformer_out, text_logits] = moshi_lmmodel_forward_text_build(
             g, lm, lm_states, lmgen->condition_sum, n_pos, &bg.embed );
 
-        bg.sampler_out = moshi_sample_token( g, text_logits,
-            lmgen->use_sampling, lmgen->temp_text, lmgen->top_k_text );
+        // Keep the logits and argmax on the host; see moshi_argmax_host.
+        bg.sampler_out = text_logits;
         g.build_forward_expand( bg.sampler_out );
 
         // VAD head, folded into the same graph instead of a separate dispatch.
@@ -912,7 +929,8 @@ int moshi_lmgen_step_batch(
     bg.ctx->compute();
 
     std::vector<int32_t> tokens( n_pos );
-    ggml_backend_tensor_get( bg.sampler_out, tokens.data(), 0, n_pos * 4 );
+    for ( int p = 0; p < n_pos; p++ )
+        tokens[p] = moshi_argmax_host( bg.sampler_out, p );
 
     // Longest valid prefix: frame k is valid iff outputs 0..k-1 were all padding.
     int accepted = 1;
@@ -1026,9 +1044,7 @@ bool moshi_lmgen_step(
             graph_transformer_out, lm_states->transformer_out );
         graph.build_forward_expand( cpy_transformer_out );
 
-        lm_states->sampler_out = moshi_sample_token( graph, text_logits,
-            use_sampling, temp_text, top_k_text );
-
+        lm_states->sampler_out = text_logits;   // argmax on the host, see moshi_argmax_host
         graph.build_forward_expand( lm_states->sampler_out );
         graph.alloc();
     }
@@ -1039,8 +1055,7 @@ bool moshi_lmgen_step(
     scratch.compute();
     graph.compute();
 
-    int text_token;
-    ggml_backend_tensor_get( lm_states->sampler_out, &text_token, 0, 4 );
+    int text_token = moshi_argmax_host( lm_states->sampler_out );
 #endif
 
     // on_text_hook

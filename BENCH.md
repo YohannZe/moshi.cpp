@@ -458,3 +458,55 @@ prefill or batched path:
    has all-zero delays, so a batch of 4 aliased frames 2 and 3 onto 0 and 1 — the cause of the
    all-padding output at k=4 that took a while to find. Now sized for `MOSHI_MAX_SPEC_N + 1`.
 4. **Masks and graph state were single-slot on the model.** Fixed in the preceding commit.
+
+---
+
+## Adreno 840 via OpenCL: the LM runs 1.64x faster on the GPU
+
+The CPU was only achieving **12.5 GB/s** of a bus worth roughly 77 GB/s (472 MB of matmul
+weights per frame at 37.8 ms). So the bottleneck was never the memory bus — it was the CPU's
+ability to saturate it. A GPU is built for exactly that.
+
+Device (SM8850 / Adreno 840, cooled, **q4_0**, one 30 s fixture):
+
+| config | Mimi ms | LM ms | RTF | chars |
+|---|---|---|---|---|
+| CPU, 6 threads | 6463 | 15222 | 0.723 | 573 |
+| **GPU, 6 threads** | 10251 | **9260** | **0.650** | 573 |
+| GPU, 4 threads | 11117 | 9313 | 0.681 | 573 |
+| GPU, 2 threads | 15674 | 9664 | 0.845 | 573 |
+
+**LM: 15222 → 9260 ms, 1.64x.** Transcript identical in every config, so the Adreno path is
+numerically correct.
+
+Net RTF is only 0.723 → 0.650 (10 %) because **Mimi gets 1.59x slower on the CPU whenever the
+GPU is running** (6463 → 10251 ms). Lowering the thread count makes it worse, so this is not
+thread oversubscription: ggml's OpenCL backend burns CPU waiting on GPU completion. That
+contention is now the limiter, not the LM.
+
+### Three things that had to be fixed to get here
+
+1. **The codec must stay on the CPU.** Mimi's SEANet stack uses **ELU**, which ggml's OpenCL
+   backend does not implement, and moshi runs a whole graph on one backend with no scheduler
+   to split it — so offloading the codec fails outright with "op not supported (UNARY)". Added
+   `moshi_context_t::backend_codec` (CPU) alongside the LM's. Safe because the two never share
+   tensors: `mimi_encode_receive` copies the RVQ codes out to host ints.
+2. **Q4_K crashes the Adreno driver.** `clSetKernelArg` segfaults inside `libCB.so` on a plain
+   Q4_K matmul. Q4_0, Q8_0 and F16 all work. The Adreno kernels are documented as tuned for
+   Q4_0, so this is consistent — and we already had a Q4_0 build measured at parity with Q4_K
+   on CPU. Isolated matmul throughput, one layer, batch 1: **CPU q4_K 2.548 ms, GPU q4_0
+   1.324 ms**.
+3. **ARGMAX is not implemented in the OpenCL backend.** Greedy sampling now argmaxes on the
+   host: one ~32 KB readback per frame against ~38 ms of compute, so free either way, and it
+   removes a graph node. `moshi_argmax_host`.
+
+Note also that on GPU, **batch 1 is the sweet spot** — batch 2 costs 2.41x batch 1 there,
+the opposite of the CPU. Which suits this workload, since it is naturally batch 1.
+
+### The next lever, and it is well defined
+
+Implementing **ELU in ggml's OpenCL backend** would let the codec run on the GPU too, removing
+the CPU contention that is currently eating two thirds of the LM's gain. ELU is
+`x > 0 ? x : alpha*(expm1(x))`, and the backend already has GELU / SILU / EXPM1 kernels to
+copy from, plus a `supports_op` case to add. If Mimi went to the GPU at anything like the LM's
+ratio, RTF would land near **0.35–0.40**.
