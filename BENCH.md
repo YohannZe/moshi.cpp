@@ -249,3 +249,38 @@ transcript hole gone.
 # device bench, with cooldown between runs
 ./tools/bench_device.sh test_16k.wav model-q4_k.gguf model-q4_0.gguf
 ```
+
+---
+
+## The text stream is 55 % padding — and that is exploitable
+
+Measured on `test_speech_90s` (1139 frames, `STT_DUMP_TOKENS=1`):
+
+| | |
+|---|---|
+| productive frames (a real text token) | 507 (44.5 %) |
+| padding frames | 632 (**55.5 %**) |
+| padding runs | 171, mean length 3.70 |
+| P(next frame is padding) | **55.4 %** |
+| P(next 2 frames padding) | 40.5 % |
+| P(next 3 frames padding) | 29.3 % |
+
+Why this matters: the LM does 12.5 full forward passes per second of audio, and each pass
+reads all 472 MB of matmul weights (we are bandwidth-bound — see above). The output rate is
+fixed by the audio, so classic speculative decoding buys nothing: you cannot produce fewer
+passes by producing more tokens.
+
+But the *input* to frame t+1 includes frame t's output text token, and that token is padding
+55 % of the time. Speculate it, batch frames (t, t+1) through the transformer in one pass,
+and verify:
+
+  expected passes per 2 frames = 0.554x1 + 0.446x2 = 1.446  vs 2
+  => ~28 % fewer weight-loading passes
+
+Batch-2 costs 2x the FLOPs, which is ~free on a bandwidth-bound workload — the weights are
+read once for both positions. Batching deeper is worse: P(3 padding) is only 29 % and the
+rollback cost grows, so 2 is the sweet spot.
+
+This is speculative decoding pointed at a different target: not "more tokens per pass" but
+"more audio frames per weight load". The hard part is rollback — undoing the KV write and
+RoPE position for frame t+1 when the guess was wrong. Not attempted.

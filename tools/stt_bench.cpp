@@ -204,6 +204,10 @@ int main(int argc, char** argv) {
         worst_frame_ms = std::max(worst_frame_ms, frame_ms);
 
         if (vad > 0.5f) vad_hits++;
+        // Dump the text-stream pattern: 0/3 are padding, anything else is a real token.
+        // Used to measure how speculatable the text stream is — see BENCH.md.
+        if (getenv("STT_DUMP_TOKENS"))
+            fprintf(stderr, "TOK %d %d\n", i, (text_token != 0 && text_token != 3) ? 1 : 0);
         // 0 = pad, 3 = existing_text_padding_id
         if (text_token != 0 && text_token != 3) {
             full_text += detok(tokenizer_id_to_piece(tok, text_token));
