@@ -149,23 +149,6 @@ public:
     bool fetch( ggml_tensor ** result, std::string name, ggml_type dst_type, int offset = 0 ) {
         if ( gguf ) {
             *result = get_tensor( name );
-            if ( *result && quantize && (*result)->type != dst_type ) {
-                // A GGUF already carries a concrete dtype per tensor, and requantizing
-                // ~1 GB at every startup would cost more than it saves. Rather than
-                // silently ignore the request (which is what this did, so every
-                // `-q q4_k` run against a GGUF actually measured the file's own types),
-                // say so once and point at the offline tool.
-                static bool warned = false;
-                if ( !warned ) {
-                    warned = true;
-                    fprintf( stderr,
-                        "moshi: ignoring -q %s for GGUF weights (file has %s). GGUF is\n"
-                        "       already typed per tensor; requantize offline instead:\n"
-                        "         requantize_gguf <in.gguf> <out.gguf> %s\n",
-                        ggml_type_name( dst_type ), ggml_type_name( (*result)->type ),
-                        ggml_type_name( dst_type ) );
-                }
-            }
             return *result? true : false;
         }
         safetensor_t * safetensor =  find( name );

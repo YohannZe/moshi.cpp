@@ -284,3 +284,45 @@ rollback cost grows, so 2 is the sweet spot.
 This is speculative decoding pointed at a different target: not "more tokens per pass" but
 "more audio frames per weight load". The hard part is rollback — undoing the KV write and
 RoPE position for frame t+1 when the guess was wrong. Not attempted.
+
+---
+
+## Repack, properly tested this time: it is a PREFILL optimization and hurts us
+
+The earlier repack attempt was reverted for a bad measurement (empty env var) and a
+segfault. Both are now fixed and the change was measured honestly. **It is still a loss.**
+
+Device (SM8850, cooled, Q4_K, 6 threads):
+
+| | Mimi ms | LM ms | RTF | chars |
+|---|---|---|---|---|
+| repack OFF | 6360 | 14692 | **0.702** | 583 |
+| repack ON | 8067 | 14845 | 0.764 | 583 |
+
+Host x86: 9317 vs 9338 ms — no difference at all.
+
+**Why, and this is the useful part:** the repacked kernels (`q4_K_8x8`, `q4_0_4x8` ...) are
+wide GEMM kernels. They need ~8 columns of activations to fill a tile. We run **batch 1** —
+every matmul is a matvec, one token at a time — so the tiles cannot be filled and there is
+nothing to win. This is consistent with llama.cpp reporting repack gains on *prompt
+processing* and not on decode. Mimi additionally got 27 % slower, presumably locality or
+dispatch differences from living in an extra buffer type.
+
+**Consequence for what to do next:** the only way to make wide kernels (and any GEMM-shaped
+optimization) pay here is to stop being batch 1. That is exactly what the text-stream
+speculation above buys — it turns two audio frames into one batch-2 pass. The two ideas are
+synergistic rather than alternatives, and batching is the prerequisite.
+
+Two ggml bugs were found and fixed while getting this far, and they are worth upstreaming
+independently of the negative result:
+
+1. `ggml_backend_cpu_repack_buffer_set_tensor` dereferenced `tensor->extra` unconditionally,
+   but `init_tensor` sets it to null for every type the buffer cannot repack (F32, F16, ...).
+   So a weight context mixing quantized matmuls with F32 norms segfaulted on the first
+   non-repackable tensor. llama.cpp never hits this because its loader assigns a buffer type
+   per tensor; any embedder allocating a whole context at once does. Fixed with a plain
+   memcpy fallback — correct because `get_alloc_size` is null for this buft (so allocation is
+   `ggml_nbytes` either way) and mul_mat dispatch already keys off `extra`.
+2. `iface.get_tensor` was left null, so any `ggml_backend_tensor_get` on a tensor in this
+   buffer jumped to address 0. Implemented symmetrically: memcpy for un-repacked tensors,
+   and an assert for repacked ones, whose layout genuinely cannot be read back.

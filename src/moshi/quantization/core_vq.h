@@ -34,20 +34,33 @@ static ggml_tensor * moshi_EuclideanCodebook_half_sqnorm(
     const int64_t card = emb->ne[1];
 
     // Pull the weights to the host in whatever dtype they were stored in.
-    std::vector<uint8_t> raw( ggml_nbytes( emb ) );
-    ggml_backend_tensor_get( emb, raw.data(), 0, raw.size() );
+    //
+    // Read tensor->data directly when the buffer is host-visible rather than going through
+    // ggml_backend_tensor_get. Not an optimization: some buffer types leave iface.get_tensor
+    // null (ggml's CPU repack buffer did), and ggml_backend_tensor_get calls it unguarded, so
+    // this would jump to address 0. Codebooks are never repacked (they are F32/F16 and only
+    // ever used by get_rows), so their data is always plainly stored and directly readable.
+    std::vector<uint8_t> raw;
+    const uint8_t * src = nullptr;
+    if ( emb->buffer && ggml_backend_buffer_is_host( emb->buffer ) ) {
+        src = (const uint8_t *) emb->data;
+    } else {
+        raw.resize( ggml_nbytes( emb ) );
+        ggml_backend_tensor_get( emb, raw.data(), 0, raw.size() );
+        src = raw.data();
+    }
 
     std::vector<float> flat( (size_t)D * card );
     if ( emb->type == GGML_TYPE_F32 ) {
-        memcpy( flat.data(), raw.data(), raw.size() );
+        memcpy( flat.data(), src, ggml_nbytes( emb ) );
     } else if ( emb->type == GGML_TYPE_F16 ) {
-        ggml_fp16_to_fp32_row( (const ggml_fp16_t*)raw.data(), flat.data(), (int64_t)D * card );
+        ggml_fp16_to_fp32_row( (const ggml_fp16_t*)src, flat.data(), (int64_t)D * card );
     } else if ( emb->type == GGML_TYPE_BF16 ) {
-        ggml_bf16_to_fp32_row( (const ggml_bf16_t*)raw.data(), flat.data(), (int64_t)D * card );
+        ggml_bf16_to_fp32_row( (const ggml_bf16_t*)src, flat.data(), (int64_t)D * card );
     } else {
         const auto * tt = ggml_get_type_traits( emb->type );
         assert( tt && tt->to_float );
-        tt->to_float( raw.data(), flat.data(), (int64_t)D * card );
+        tt->to_float( src, flat.data(), (int64_t)D * card );
     }
 
     std::vector<float> half_sq( card );

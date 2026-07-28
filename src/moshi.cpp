@@ -729,8 +729,21 @@ struct moshi_lm_gen_t {
     moshi_lmgen_state_t * lmgen_state;
 };
 
+// These are raw pointers with no initializers and moshi_lm_generator allocates with a bare
+// `new`, so they held garbage until moshi_lm_start wrote them — which made any "already
+// started?" check read uninitialized memory. Zero them at construction.
+static void moshi_lm_gen_clear( moshi_lm_gen_t * gen ) {
+    gen->machine       = nullptr;
+    gen->machine_state = nullptr;
+    gen->state_ctx     = nullptr;
+    gen->ctx           = nullptr;
+    gen->lm_states     = nullptr;
+    gen->lmgen_state   = nullptr;
+}
+
 moshi_lm_gen_t * moshi_lm_generator( moshi_lm_t * lm ) {
     auto gen = new moshi_lm_gen_t;
+    moshi_lm_gen_clear( gen );
     gen->lm = lm;
     return gen;
 }
