@@ -510,3 +510,28 @@ the CPU contention that is currently eating two thirds of the LM's gain. ELU is
 `x > 0 ? x : alpha*(expm1(x))`, and the backend already has GELU / SILU / EXPM1 kernels to
 copy from, plus a `supports_op` case to add. If Mimi went to the GPU at anything like the LM's
 ratio, RTF would land near **0.35–0.40**.
+
+### Correction: the GPU's real margin is ~9%, and the CPU noise floor is +/-7%
+
+The table above compares q4_0 against q4_0, but the app runs **q4_K**. Measured in one session
+with a cooldown before each run:
+
+| config | LM ms | RTF | chars |
+|---|---|---|---|
+| CPU q4_K | 15236 | 0.734 | 583 |
+| CPU q4_0 | 15377 | 0.720 | 573 |
+| **GPU q4_0** | **9513** | **0.627** | 573 |
+| CPU q4_K (repeat) | 14537 | **0.686** | 583 |
+
+So against the *best* CPU run (0.686, consistent with the 0.685 measured earlier), the GPU is
+**~9 %** better, not the 10 % implied by comparing to a q4_0 CPU baseline.
+
+More important: **CPU q4_K varies 0.686–0.734 run to run** — same binary, same weights, cooled
+each time. That +/-7 % spread is comparable to the GPU's whole advantage. The LM figure itself
+is unambiguous (14537 -> 9513 ms, **1.53x**); it is the *total* RTF gain that drowns in the CPU
+contention the OpenCL driver creates.
+
+Also retracting an earlier claim: "q4_K is faster than q4_0 on CPU" rested on 41.00 vs
+42.21 ms from the quantization session — a 3 % difference, i.e. below this noise floor. They are
+equivalent on CPU. The real differences are that q4_K yields 583 characters against 573, and
+that q4_K crashes the Adreno driver.
