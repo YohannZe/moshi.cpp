@@ -556,22 +556,24 @@ ggml_tensor * moshi_lmmodel_text_token_embed_build(
         GraphContext & ctx,
         moshi_lmmodel_t * lm,
         lmmodel_embed_t * embed,
-        ggml_tensor * sum_condition
+        ggml_tensor * sum_condition,
+        int n_pos = 1
     ) {
 
     ggml_tensor * input;
     if ( lm->demux_second_stream ) {
+        assert( n_pos == 1 && "demux_second_stream has no batched path" );
         input = moshi_scaled_embedding_demux_build( ctx,
             lm->text_emb_demux, &embed->text_demux );
     } else {
         input = moshi_scaled_embedding_build( ctx,
-            lm->text_emb, &embed->text );
+            lm->text_emb, &embed->text, n_pos );
     }
 
     embed->audio.resize( lm->num_audio_codebooks );
     for (int cb_index = 0; cb_index < lm->num_audio_codebooks; cb_index++) {
         auto audio_emb = moshi_scaled_embedding_build( ctx,
-            lm->emb[cb_index], &embed->audio[cb_index] );
+            lm->emb[cb_index], &embed->audio[cb_index], n_pos );
 
         input = ggml_add( ctx, input, audio_emb );
     }
@@ -581,6 +583,25 @@ ggml_tensor * moshi_lmmodel_text_token_embed_build(
     }
 
     return input;
+}
+
+// Batched: `sequences[p]` is the full codebook vector for position p.
+void moshi_lmmodel_text_token_embed_step_batch(
+        GraphContext & ctx,
+        moshi_lmmodel_t * lm,
+        lmmodel_embed_t * embed,
+        const std::vector<std::vector<int>> & sequences
+    ) {
+    const int n_pos = (int) sequences.size();
+    std::vector<int> col( n_pos );
+    for ( int p = 0; p < n_pos; p++ ) col[p] = sequences[p][0];
+    moshi_scaled_embedding_step_batch( ctx, lm->text_emb, &embed->text, col );
+
+    for (int cb = 0; cb < lm->num_audio_codebooks; cb++) {
+        for ( int p = 0; p < n_pos; p++ )
+            col[p] = sequences[p][cb + lm->audio_offset];
+        moshi_scaled_embedding_step_batch( ctx, lm->emb[cb], &embed->audio[cb], col );
+    }
 }
 
 void moshi_lmmodel_text_token_embed_step(
@@ -660,9 +681,10 @@ std::tuple<ggml_tensor*, ggml_tensor*> moshi_lmmodel_forward_text_build(
         GraphContext & ctx,
         moshi_lmmodel_t * lm,
         moshi_lmmodel_states_t * state,
-        ggml_tensor * sum_condition
+        ggml_tensor * sum_condition,
+        int n_pos = 1
     ) {
-    auto input = moshi_lmmodel_text_token_embed_build( ctx, lm, &state->embed, sum_condition );
+    auto input = moshi_lmmodel_text_token_embed_build( ctx, lm, &state->embed, sum_condition, n_pos );
 
     state->transformer_T = (int)input->ne[1];
     auto transformer_out = moshi_streaming_transformer_graph_build( ctx,

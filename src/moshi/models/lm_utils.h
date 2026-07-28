@@ -154,12 +154,16 @@ struct embedding_t {
     ggml_tensor * scale;
 };
 
+// n_pos > 1 builds the embedding for a whole batch of positions in one get_rows, which is
+// what lets the LM run several audio frames per weight load. The scale tensor is [1, n_pos]
+// so it broadcasts over dim while still carrying a per-position is_zero mask.
 ggml_tensor * moshi_scaled_embedding_build(
         GraphContext & ctx,
         moshi_scaled_embedding_t * m,
-        embedding_t * emb ) {
-    auto input = ctx.new_tensor( GGML_TYPE_I32, GGML_NE( 1 ) );
-    auto scale = ctx.new_tensor( GGML_TYPE_F32, GGML_NE( 1 ) );
+        embedding_t * emb,
+        int n_pos = 1 ) {
+    auto input = ctx.new_tensor( GGML_TYPE_I32, GGML_NE( n_pos ) );
+    auto scale = ctx.new_tensor( GGML_TYPE_F32, GGML_NE( 1, n_pos ) );
     emb->input = input;
     emb->scale = scale;
     auto y = ggml_get_rows( ctx, m->weight, input );
@@ -179,6 +183,23 @@ void moshi_scaled_embedding_step(
         input = 0;
     ctx.tensor_set( emb->input, input );
     ctx.tensor_set( emb->scale, is_zero? 0.f : 1.f );
+}
+
+// Batched counterpart. One index and one scale per position, in one upload each.
+void moshi_scaled_embedding_step_batch(
+        GraphContext & ctx,
+        moshi_scaled_embedding_t * m,
+        embedding_t * emb,
+        const std::vector<int> & inputs ) {
+    std::vector<int32_t> idx( inputs.size() );
+    std::vector<float>   scl( inputs.size() );
+    for ( size_t i = 0; i < inputs.size(); i++ ) {
+        const bool is_zero = inputs[i] == -1;
+        idx[i] = is_zero? 0 : inputs[i];
+        scl[i] = is_zero? 0.f : 1.f;
+    }
+    ctx.tensor_set( emb->input, idx );
+    ctx.tensor_set( emb->scale, scl );
 }
 
 ggml_tensor * moshi_scaled_embedding(

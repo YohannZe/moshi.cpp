@@ -1,5 +1,7 @@
 #pragma once
 
+#include <map>
+
 #include "gating.h"
 #include "rope.h"
 
@@ -1068,7 +1070,11 @@ struct moshi_streaming_transformer_t {
     int rope_max_period;
     int dim_per_head;
     own_ptr_vector<moshi_streaming_transformer_layer_t> layers;
-    bias_pattern_t pattern;
+    // Keyed by T. The pattern tensor is an own_ctx_tensor, so new_tensor() frees the
+    // previous one — a single shared field meant a T=1 graph and a T=N graph would free
+    // each other's mask the moment both existed. Latent until speculation introduced a
+    // second T.
+    std::map<int, bias_pattern_t> patterns;
 };
 
 struct moshi_streaming_transformer_graph_t {
@@ -1084,7 +1090,10 @@ struct moshi_streaming_transformer_graph_t {
 struct moshi_streaming_transformer_state_t {
     int offset;
     own_ptr_vector<moshi_streaming_transformer_layer_state_t> layers;
-    moshi_streaming_transformer_graph_t graph;
+    // Keyed by T, like the masks: each T needs its own graph tensors (attn_bias sized
+    // [capacity,T], T cache indices, ...). The KV cache itself lives in `layers` and is
+    // correctly shared — it is the same cache whichever T wrote it.
+    std::map<int, moshi_streaming_transformer_graph_t> graphs;
 };
 
 moshi_streaming_transformer_state_t * moshi_streaming_transformer_state(
@@ -1166,7 +1175,7 @@ ggml_tensor * moshi_streaming_transformer(
 
     int64_t T = x->ne[1];
 
-    auto attn_bias = get_attn_bias( ctx, &m->pattern, capacity, T, offset );
+    auto attn_bias = get_attn_bias( ctx, &m->patterns[(int)T], capacity, T, offset );
 
     timestep_embedding_t tsemb = { NULL, NULL };
     if ( rope_max_period ) {
@@ -1193,7 +1202,8 @@ ggml_tensor * moshi_streaming_transformer_graph_build(
         moshi_streaming_transformer_state_t * states,
         ggml_tensor * x ) {
 
-    states->graph.ctx = &gctx;
+    auto & sgraph = states->graphs[(int) x->ne[1]];
+    sgraph.ctx = &gctx;
 
     auto rope_max_period = m->rope_max_period;
     int64_t D = m->dim_per_head;
@@ -1201,31 +1211,34 @@ ggml_tensor * moshi_streaming_transformer_graph_build(
 
     int64_t T = x->ne[1];
 
-    // attn_bias
-    create_bias_pattern( gctx.backend, m->pattern, capacity, (int) T, 0, -INFINITY );
-    states->graph.attn_bias = gctx.new_tensor(
+    // attn_bias — one pattern per T, created once (create_bias_pattern reallocates, so
+    // calling it again would free a tensor a live graph still points at).
+    auto & pattern = m->patterns[(int)T];
+    if ( ! pattern.tensor )
+        create_bias_pattern( gctx.backend, pattern, capacity, (int) T, 0, -INFINITY );
+    sgraph.attn_bias = gctx.new_tensor(
         GGML_TYPE_F32, GGML_NE( capacity, T ) );
 
     // offset for timestep_embedding
     timestep_embedding_t tsemb = { NULL, NULL };
     if ( rope_max_period ) {
-        states->graph.offset = gctx.new_tensor(
+        sgraph.offset = gctx.new_tensor(
             GGML_TYPE_F32, GGML_NE( 1 ) );
         moshi_get_timestep_embedding( gctx, (int)T, (int)D,
-            states->graph.offset, rope_max_period, tsemb );
+            sgraph.offset, rope_max_period, tsemb );
     } else {
-        states->graph.offset = NULL;
+        sgraph.offset = NULL;
     }
 
     // indices
-    states->graph.indices = gctx.new_tensor(
+    sgraph.indices = gctx.new_tensor(
         GGML_TYPE_I32, GGML_NE( T ) );
 
     return moshi_streaming_transformer( gctx,
         m, states,
-        states->graph.attn_bias,
+        sgraph.attn_bias,
         &tsemb,
-        states->graph.indices,
+        sgraph.indices,
         x );
 }
 
@@ -1239,26 +1252,28 @@ void moshi_streaming_transformer_graph_step(
     int64_t D = m->dim_per_head;
     int capacity = m->capacity;
 
+    auto & sgraph = states->graphs[T];
+
     int offset = states->offset;
     states->offset += T;
 
     // update attn_bias
-    if ( states->graph.attn_bias ) {
-        auto attn_bias = bias_pattern_index( ctx, m->pattern, offset );
-        attn_bias = ggml_cpy( ctx, attn_bias, states->graph.attn_bias );
+    if ( sgraph.attn_bias ) {
+        auto attn_bias = bias_pattern_index( ctx, m->patterns[T], offset );
+        attn_bias = ggml_cpy( ctx, attn_bias, sgraph.attn_bias );
         ctx.build_forward_expand( attn_bias );
     }
 
     // update offset
-    if ( states->graph.offset ) {
-        states->graph.ctx->tensor_set( states->graph.offset, (float)offset );
+    if ( sgraph.offset ) {
+        sgraph.ctx->tensor_set( sgraph.offset, (float)offset );
     }
 
     // update indices
-    std::vector<int32_t> offsets( ggml_nelements( states->graph.indices ) );
+    std::vector<int32_t> offsets( ggml_nelements( sgraph.indices ) );
     for (int i = 0; i < offsets.size(); i++)
         offsets[i] = (offset + i) % capacity;
-    states->graph.ctx->tensor_set( states->graph.indices, offsets );
+    sgraph.ctx->tensor_set( sgraph.indices, offsets );
 }
 
 ggml_tensor * moshi_streaming_transformer_graph(
@@ -1269,36 +1284,39 @@ ggml_tensor * moshi_streaming_transformer_graph(
 
     int64_t T = x->ne[1];
 
-    if ( ! states->graph.ctx ) {
+    if ( ! states->graphs[(int)T].ctx ) {
         // create graph
-        states->graph.ctx = new GraphContext( 256, ctx.backend );
+        auto & g = states->graphs[(int)T];
+        g.ctx = new GraphContext( 256, ctx.backend );
 
-        states->graph.x = ggml_dup_tensor( *states->graph.ctx, x );
+        g.x = ggml_dup_tensor( *g.ctx, x );
 
         auto result = moshi_streaming_transformer_graph_build(
-            *states->graph.ctx, m, states, states->graph.x );
+            *g.ctx, m, states, g.x );
 
-        states->graph.result = ggml_dup_tensor( *states->graph.ctx, result );
-        auto result_cpy = ggml_cpy( *states->graph.ctx, result, states->graph.result );
-        states->graph.ctx->build_forward_expand( result_cpy );
+        g.result = ggml_dup_tensor( *g.ctx, result );
+        auto result_cpy = ggml_cpy( *g.ctx, result, g.result );
+        g.ctx->build_forward_expand( result_cpy );
 
-        states->graph.ctx->alloc();
+        g.ctx->alloc();
     }
 
     moshi_streaming_transformer_graph_step( ctx, m, states, (int)T );
 
+    auto & g = states->graphs[(int)T];
+
     // cpy x
-    auto x_cpy = ggml_cpy( ctx, x, states->graph.x );
+    auto x_cpy = ggml_cpy( ctx, x, g.x );
     ctx.build_forward_expand( x_cpy );
 
     // copy inputs to transformer graph
     ctx.compute();
 
     // compute transformer
-    states->graph.ctx->compute();
+    g.ctx->compute();
 
     // result is static and can be used by scratch ctx
-    return states->graph.result;
+    return g.result;
 }
 
 void get_weights( WeightLoader * loader, std::string path,
