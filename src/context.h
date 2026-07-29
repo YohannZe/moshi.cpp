@@ -2,6 +2,8 @@
 
 #include <inttypes.h>
 
+#include "imatrix.h" 
+
 #include <stdexcept>
 
 typedef int64_t NE[GGML_MAX_DIMS]; // number of elements per dimension
@@ -558,6 +560,10 @@ class GraphContext {
         assert( backend );
         if (name.size()) {CAPTURE(name, gf);}
         ggml_backend_graph_compute( backend, gf );
+        // Activation statistics for importance-weighted quantization; no-op unless
+        // MOSHI_IMATRIX is set. Safe here because this class allocates every tensor a
+        // permanent slot, so intermediates are still live after compute.
+        moshi_imatrix_collect( gf );
         _debug_compute();
     }
 };
@@ -651,6 +657,7 @@ class ScratchContext : public GraphContext {
         // compute
         if (name.size()) {CAPTURE(name, gf);}
         ggml_backend_graph_compute( backend, gf );
+        moshi_imatrix_collect( gf );
 
         // debug
         _debug_compute();

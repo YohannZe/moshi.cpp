@@ -28,6 +28,9 @@
 #include <cstring>
 #include <cstdint>
 #include <string>
+#include <map>
+
+#include "../src/imatrix.h"
 #include <vector>
 #include <algorithm>
 
@@ -37,6 +40,7 @@
 static void usage(const char* prog) {
     fprintf(stderr,
 "usage: %s <in.gguf> <out.gguf> <quant> [--keep-f32-embeddings] [--quantize-all]\n"
+"          [--imatrix <file>]\n"
 "\n"
 "  quant   q3_k | q4_0 | q4_k | iq4_xs | q5_k | q6_k | q8_0 | f16\n"
 "\n"
@@ -52,6 +56,11 @@ static void usage(const char* prog) {
 "\n"
 "  --keep-f32-embeddings  leave embedding tables at F32 instead of F16\n"
 "  --quantize-all         also quantize embedding tables to <quant>\n"
+"  --imatrix <file>       importance-weighted quantization: per-column E[x^2] collected\n"
+"                         from real audio (MOSHI_IMATRIX=<file> on any moshi run). Without\n"
+"                         it, quantization minimizes error on the weights; with it, on the\n"
+"                         outputs the model actually produces. Matters most for the codec,\n"
+"                         whose hard argmax cascade turns weight noise into flipped codes.\n"
 "\n"
 "Never emits BF16: it has no ARM CPU kernel in ggml.\n", prog);
     exit(1);
@@ -126,9 +135,15 @@ int main(int argc, char** argv) {
     const ggml_type quant = parse_quant(argv[3]);
 
     bool keep_f32_emb = false, quantize_all = false;
+    std::map<std::string, std::vector<float>> imatrix;
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--keep-f32-embeddings")) keep_f32_emb = true;
         else if (!strcmp(argv[i], "--quantize-all"))   quantize_all = true;
+        else if (!strcmp(argv[i], "--imatrix") && i + 1 < argc) {
+            imatrix = moshi_imatrix_load(argv[++i]);
+            if (imatrix.empty()) { fprintf(stderr, "error: empty imatrix\n"); return 1; }
+            printf("imatrix: %zu tensors loaded\n", imatrix.size());
+        }
         else usage(argv[0]);
     }
 
@@ -170,7 +185,8 @@ int main(int argc, char** argv) {
             dst_type = keep_f32_emb ? GGML_TYPE_F32 : GGML_TYPE_F16;
             why = "lookup table";
         } else {
-            dst_type = quant;                             why = "matmul";
+            dst_type = quant;
+            why = imatrix.count(n) ? "matmul+imatrix" : "matmul";
         }
 
         // Quantized types need whole blocks per row.
@@ -209,8 +225,17 @@ int main(int argc, char** argv) {
             } else {
                 const int64_t n_per_row = src->ne[0];
                 const int64_t nrows = ggml_nelements(src) / n_per_row;
+                // Importance weights, when we have them for this tensor at the right width.
+                const float* iw = nullptr;
+                auto it = imatrix.find(n);
+                if (it != imatrix.end()) {
+                    if ((int64_t)it->second.size() == n_per_row) iw = it->second.data();
+                    else fprintf(stderr, "  warn: imatrix for %s has %zu entries, "
+                                         "tensor row is %lld -- ignored\n",
+                                 name, it->second.size(), (long long)n_per_row);
+                }
                 const size_t written = ggml_quantize_chunk(dst_type, f32.data(), dst->data,
-                                                           0, nrows, n_per_row, nullptr);
+                                                           0, nrows, n_per_row, iw);
                 if (written != nbytes) {
                     fprintf(stderr, "error: %s quantize wrote %zu, expected %zu\n",
                             name, written, nbytes);

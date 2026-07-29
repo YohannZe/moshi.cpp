@@ -817,3 +817,101 @@ convolution ring buffers, and **it is the forward pass itself that determines th
 padding**. The 65 % is not waste, it is the cost of maintaining state. Skipping a frame
 corrupts everything after it. What remains is not computing the 8001-wide output head on
 padding frames, which is ~2 % of traffic.
+
+---
+
+# Importance-weighted quantization, kernel flags, and the sustained regime (2026-07-29)
+
+Four experiments on "revoir l'inférence" beyond hardware tuning. One new capability, three
+clean negatives — all measured.
+
+## imatrix: moshi.cpp can now do importance-weighted quantization
+
+Everything quantized so far minimized error ON THE WEIGHTS (‖W−Ŵ‖); what matters is error on
+the OUTPUTS (‖(W−Ŵ)x‖ over the activations the model actually sees). `ggml_quantize_chunk`
+accepts per-column importance weights; nothing in this repo produced them.
+
+Now: `src/imatrix.h` hooks `GraphContext::compute()` (every graph flows through it, and its
+tensors have permanent slots, so activations are readable post-compute), accumulates per-column
+E[x²] for every named leaf feeding a MUL_MAT, and writes a `moshi-imatrix v1` text file at
+exit. Runs accumulate across processes (the file is reloaded at init). `requantize_gguf
+--imatrix <file>` applies it. Guarded on the env var's *value*, not presence — the repack
+lesson.
+
+Collection: 2.5 min of French (test_speech_90s + test_speech_music + cap24k, the phone's own
+captured audio). **test_16k held out for eval.** Scored with tools/quant_sweep.sh's WER
+against the F16 transcript of the same model.
+
+Codec (the argmax-cascade end, where quantization hurts most):
+
+| codec | WER vs F16, held-out | size |
+|---|---|---|
+| Q4_K plain | 6.06 % | 114 MB |
+| Q4_K + imatrix | **3.03 %** | 114 MB |
+| **Q5_K + imatrix** | **1.01 %** (one word + a comma) | 120 MB |
+| Q6_K + imatrix | 3.03 % | 127 MB |
+
+**At identical size, the imatrix halves the damage.** Held-out and in-set WER are identical
+(3.03/3.01, 1.01/1.00), so 2.5 min of audio does not overfit. Note the Q6 > Q5 inversion —
+single-fixture granularity is one word; treat ±1 word as the noise floor.
+
+(Methodology note: the earlier "Q4_K codec = 15.93 %" was hand-scored against a different
+reference; the 6.06 % here is quant_sweep.sh vs F16. Within this table everything is scored
+identically, which is what matters for the comparison.)
+
+**Not deployed.** Host says Q5_K+imat Mimi is ~4 % faster than F16; the cooled interleaved
+device A/B came back inside thermal noise (+7 %, +40 %, −11 % across three pairs — the phone
+was reheating faster than it cooled). −63 MB resident is real (the phone swaps), but the
+standing rule is that a speed gain that degrades text is not a gain, and the speed gain is
+unproven on the target. The infrastructure is the deliverable: if a smaller-RAM device ever
+becomes a target, Q5_K+imatrix is the known-good codec recipe.
+
+LM + imatrix: pointless to measure — Q4_K already scores 0.00 % vs F16 on both fixtures, and
+the imatrix cannot change speed at a fixed type. Skipped for that stated reason.
+
+## +fp16 kernels: 21–25 % SLOWER — P6's assumption was wrong
+
+The build used `-march=armv8.6-a+dotprod+i8mm`, which does **not** define
+`__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` (verified via `-dM -E`). So every F16 dot product —
+all of Mimi, the KV cache, flash attention — runs through convert-to-F32 paths, and P6
+assumed native FP16 FMA would be a win.
+
+Measured (cooled, interleaved, test_16k): baseline lm_ms 11348/13409 vs +fp16 13744/16749 —
+**+21 % and +25 % slower**, and the transcript shifts by one character (F16 accumulation
+changes the numerics). On this core the FP16-accumulate SIMD path loses to FCVTL+FMLA with
+F32 accumulators. Rejected; the flag stays off.
+
+## Thread count in the sustained regime: 6 confirmed, hypothesis refuted
+
+"6 threads optimal" had only been measured cold. Under the thermal cap, power is superlinear
+in frequency but linear in cores, so fewer-threads-at-higher-clock was plausible. Measured
+(tools/bench_threads.sh: cool to 42 °C, run 90 s twice back-to-back, keep pass 2):
+
+| threads | steady-state RTF |
+|---|---|
+| 4 | 0.674 |
+| **6** | **0.606** |
+| 8 | 1.567 |
+
+Refuted — 4 threads is 11 % worse even with the cap dropping to 1.9 GHz mid-run. And 8 is
+catastrophic (2.6x): every barrier waits for the slowest core, and at 8 threads the two prime
+cores can't carry the six mid cores. The app's `nThreads = 6` stands.
+
+## KV cache Q8_0: blocked at the kernel, not attempted
+
+The remaining F16 traffic is the attention cache (~10 % of total at context 375). Quantizing
+it to Q8_0 is the TurboQuant-adjacent move — but
+`ggml_compute_forward_flash_attn_ext_f16` gates its fast split-KV and tiled paths on
+`k->type == F32 || F16` (already documented at transformer.h:167), so Q8_0 KV would take the
+generic path, and the q3_k result shows exactly what happens when dequant cost meets a lost
+fast path. Prediction is firmly negative and the experiment is not cheap (quantized cache
+init, per-slot quantized writes, flash fallback). Revisit only if ggml grows a fast
+quantized-KV FA path on ARM.
+
+## Where this leaves the CPU path
+
+Every cheap lever is now measured: quantization (both ends), kernel flags, thread count,
+context width, repack, speculation. The binding constraint is the thermal cap, and the only
+untested software lever against it is OpenMP (the build spins 745 seq-cst barriers per frame
+with GGML_OPENMP=OFF) — pending, needs the device back. Beyond that, meaningfully faster means
+a different compute substrate (GPU/NPU), which is currently excluded by policy.
