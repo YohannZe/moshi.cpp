@@ -1027,3 +1027,74 @@ listed lever touched. q3_k, +fp16 and OpenMP all "made no sense" because they we
 the 30 % of the machine that was actually doing matmuls, while the majority went to a memcpy
 storm none of them affected. The profile, not the lever list, is the ground truth. Profile
 first; the lever list comes second.
+
+---
+
+# FLEURS-fr: the first standard-benchmark numbers (2026-07-29, night)
+
+Every quality figure before this section was measured on in-house fixtures against the F16
+transcript of the same model — right for isolating quantization damage, unusable as an
+absolute claim. This section is the standard-benchmark evaluation, on the exact deployed
+pipeline (tools/stt_eval: frame-by-frame streaming, 0.5 s delay, codec reset between
+utterances, LM context persisting across them — deployment mode, as the app runs).
+
+Dataset: google/fleurs fr_fr test, all 676 utterances (7024 s of speech). Scoring:
+tools/score_wer.py, symmetric normalization. Note: kyutai publishes no FLEURS-fr WER for
+stt-1b (model card has no numbers; the DSM paper evaluates ASR in English only), so as far
+as we can tell these are the first public FLEURS-fr figures for this model.
+
+| config | WER | S / I / D | host RTF |
+|---|---|---|---|
+| F16 | 11.29 % | 1435 / 317 / 279 | 0.677 |
+| **Q4_K (deployed)** | **11.40 %** | 1453 / 315 / 284 | **0.344** |
+| Q4_K, 3 session artifacts patched | 11.07 % | 1465 / 316 / 211 | — |
+
+**Quantization costs 0.11 WER points for 1.97x speed and 2.6x smaller weights** — the
+in-house "Q4_K scores 0.00 % vs F16" finding, now confirmed at benchmark scale.
+
+For rough context (literature values, TO VERIFY before citing): whisper-small ≈ 13–15 % on
+FLEURS-fr, medium ≈ 9–10 %, large-v3 ≈ 5–6 % — none of them streaming. This model sits
+between small and medium in quality while emitting text 0.5 s behind the audio on a phone
+CPU.
+
+## Finding 1: a neural-codec STT is input-gain sensitive
+
+FLEURS ships float32 WAVs peaking around **-46 dBFS**. Fed as-is: **17.62 % WER and 29/676
+empty transcripts**. Peak-normalized to -3 dBFS: **11.40 % and 3 empties**. Six points of
+WER were the *level*, not the model.
+
+Log-mel systems (whisper) are largely immune to this; Mimi's encoder sees raw samples, and
+its RVQ stages starve on tiny amplitudes. Nobody documents this failure mode. It also has a
+direct product implication for Katarina: a quietly-mastered podcast pays the same penalty,
+so the capture pipeline should auto-gain (the JNI health line already logs post-resample
+RMS, which is the signal needed).
+
+Recognition pattern, now seen twice in one day: **healthy-looking levels + empty text =
+suspect the input format/scale before the model** (this morning it was float32-as-int16;
+tonight it was -46 dBFS).
+
+## Finding 2: cross-utterance LM context can mute an entire utterance
+
+3/676 utterances (0.44 %) produce zero text in deployment mode but transcribe perfectly in
+a fresh process — same files, healthy levels, both F16 and Q4_K (the same 3 files in both,
+so it is not quantization). The persistent LM context occasionally locks the text stream
+for the following utterance. That is the measured cost of deployment-mode evaluation, and
+patching just those 3 with fresh-state outputs gives the utterance-independent estimate
+(11.07 %).
+
+## Method note, recorded because it almost went wrong
+
+While patching those 3, the first patch attempt used a hypothesis that had been truncated
+by the terminal (`cut -c1-150`) and hand-completed from memory — i.e. fabricated eval data.
+Caught on re-read, redone from full untruncated outputs (11.06 → 11.07 %, immaterial, but
+the principle is not). Eval hypotheses only ever come from the tool's own output, never
+from a human filling gaps.
+
+## Still missing for the paper
+
+- The apples-to-apples baseline: kyutai's reference PyTorch implementation on the same 676
+  files, same scorer — "our port vs the reference". PyTorch CPU will take hours; run
+  overnight.
+- Device RTF on FLEURS (host RTF above is not the deployment number).
+- Battery. Nobody ships an RTF; they ship hours.
+- Verify the whisper literature numbers above before citing them.
