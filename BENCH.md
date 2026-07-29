@@ -637,3 +637,91 @@ Most likely the platform demoting a long-running `adb shell` process into a rest
 device RTF from a long benchmarking session is not trustworthy, and only interleaved A/Bs taken
 close together are.** The quality figures above are host-side and unaffected. Treat every
 absolute device RTF in this file as a lower bound with a wide error bar.
+
+---
+
+# The app produced no text while the engine was fine (2026-07-29)
+
+Whole in-app sessions transcribed **nothing** — one ran 11 minutes at RTF 0.74 and emitted zero
+characters — while audio levels looked healthy. I first explained this away as instrumental
+music. That was wrong, and the correction is the most useful thing in this section.
+
+## Grouping the log by pid settled it in one command
+
+| pid | audio captured | text emitted |
+|---|---|---|
+| 15638 | 11:23:30 → 11:34:45 (**11 min**) | 0 |
+| 16385 | 70 s | 0 |
+| 25869 | 55 s | 0 |
+| 26975 | 78 s | **46 outputs** |
+
+Eleven minutes of continuous audio at rms ~5000 is not instrumental. And pid 15638 was healthy
+at RTF 0.74 for its first 75 chunks and *still* emitted nothing, so it was never a speed problem.
+It then collapsed to **RTF 4.54 with 383 dropped chunks**.
+
+Having a fixture that reproduced the *benign* explanation (`test_music` → 0 chars) made me more
+confident, not less. That is exactly backwards: a hypothesis that explains the symptom is not
+evidence for itself.
+
+## The engine is innocent — and deterministic
+
+The app now dumps the PCM it feeds. Replaying that dump (30 s of real captured audio) through
+`stt_bench`, five times:
+
+```
+chars=469  rtf=1.210   <- first run, phone warm from a previous session
+chars=469  rtf=0.521
+chars=469  rtf=0.517
+chars=469  rtf=0.523
+chars=469  rtf=0.528
+```
+
+Byte-identical transcripts, 5/5. So the model, the weights, the quantization and the JNI feed
+loop are all fine on exactly the bytes the app captured.
+
+## Refuted: "the LM stays wedged across sessions"
+
+The app calls `streamFlush()` (which pushes ~0.5 s of silence) at session end and then
+`streamReset()` (codec only, LM context deliberately kept) at the next session start. Plausible
+attractor: the LM conditions on its own emitted text tokens, so a run of padding could
+self-reinforce and never recover — matching "never recovers".
+
+`STT_SESSIONS=4` replays the audio through one context with exactly that sequence:
+
+```
+chars per session: 469 480 480 480     rtf=0.555 over 120 s
+```
+
+**Refuted.** No degradation, and RTF is flat over 4 sessions — so the engine also does not drift
+over minutes, which matters for the collapse below.
+
+## Root cause: the app was losing captured audio, unreported
+
+`AudioRecord`'s ring buffer was `getMinBufferSize()` — **1920 bytes, 40 ms at 24 kHz**. The
+reader thread has that long to come back before AudioRecord overwrites unread samples, and it
+was doing far more than 40 ms of work per chunk: a 24000-sample byte conversion, a second
+24000-sample pass for RMS, and a **blocking file write** for the PCM dump — which, when it
+failed with EACCES, logged a 25-line stack trace *every second*. The diagnostic was causing the
+loss it existed to diagnose.
+
+AudioRecord never reports this. So the stream fed to the model had holes in it while the levels
+still looked fine — and for a model with per-frame convolution and KV state, a spliced stream is
+state corruption, not a small gap. That is the mechanism, and it explains every feature of the
+symptom: intermittent (scheduling luck), levels healthy, never recovers, worse under load.
+
+Fixes: ring ≥ 2 s (96 kB); ring size split from read granularity (one variable served both, so
+the ring could not be grown without making each read block for a second); dump moved to the
+inference thread; a dropped chunk now triggers a codec reset, because the next chunk is not
+contiguous with the last.
+
+And the instrument that was missing — the reader compares samples collected against the wall
+clock (the source runs at exactly `captureSampleRate`, so any shortfall is audio that no longer
+exists) and logs `capture LOST <n>ms`. Plus a JNI health line every 10 s: frames, share emitting
+a real token, post-resample RMS, max VAD, which separates "handed silence" from "LM only emits
+padding" from "detokenizer drops everything".
+
+## Still open: the in-app RTF collapse
+
+pid 15638 went from RTF 0.74 to **4.54** with 383 dropped chunks after ~98 s. The engine is flat
+at 0.555 over 120 s and 4 sessions, so this is contention, thermal, or cpuset demotion — not the
+model. Unexplained, and not claimed as fixed by the above.
