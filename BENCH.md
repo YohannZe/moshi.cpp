@@ -535,3 +535,63 @@ Also retracting an earlier claim: "q4_K is faster than q4_0 on CPU" rested on 41
 42.21 ms from the quantization session — a 3 % difference, i.e. below this noise floor. They are
 equivalent on CPU. The real differences are that q4_K yields 583 characters against 573, and
 that q4_K crashes the Adreno driver.
+
+---
+
+## The best CPU win of all, and it is one config field: narrow the attention window
+
+`context` is the attention window in frames at 12.5 Hz, shipped at **750 = 60 s**. Attention
+reads the whole window every frame: `750 x 128 x 16 heads x 2 (K,V) x 2 bytes x 16 layers`
+= **98 MB/frame, ~20 % of all traffic**. Halving it is nearly free in quality and large in speed.
+
+Device (SM8850, cooled, q4_K, interleaved):
+
+| context | LM ms | RTF (30 s) | chars |
+|---|---|---|---|
+| 750 | 15344 | 0.734 | 583 |
+| **375** | **10282** | **0.555** | 569 |
+
+**-32 % on the LM, -24 % RTF.** And on 90 s of continuous speech, context=375 yields **1735
+characters — exactly the same as 750**, so no coverage is lost. On host, word error over the
+90 s fixture moves 10.32 % -> 10.91 %: two words out of 339.
+
+375 is also markedly more *stable*: two runs gave 10282 and 10536 ms (2.5 % apart) where 750
+gave 15344 and 28147. Less memory traffic, less thermal and contention sensitivity.
+
+**250 is a trap**: RTF 0.369 on host looks better still, but word error jumps to 14.45 %
+(+4 points). That is a real loss. 375 is the knee.
+
+Why this is safe for Katarina specifically: the model needs this window only for linguistic
+continuity. The user's questions are answered from the app's own 3000-character rolling text
+buffer, not from the model's acoustic memory. The KV cache halves as a bonus (98 -> 49 MB).
+
+Mask correctness re-verified by simulation at capacity 250, 375 and 750 for t=1 and t=2 — the
+wrapped-branch fix holds at every window size, not just the one it was found at.
+
+**This beats the GPU while staying on the CPU**: 0.555 against the Adreno's 0.627. Deployed by
+`deploy_kyutai_model.sh` (override with `CONTEXT=`).
+
+### Where that leaves the ranking of remaining ideas
+
+Measured or reasoned, best ratio first:
+
+1. ~~Narrow the context~~ — **done, -24 %.**
+2. **ELU in ggml's OpenCL backend**, which would move Mimi to the GPU and remove the CPU
+   contention that ate two thirds of the LM's 1.53x GPU gain. Bounded, no ML risk, upstreamable.
+3. **Early exit on padding frames.** 55 % of frames emit padding; a probe on layer-4
+   activations predicting that would skip 12 of 16 layers on those frames (~-41 % in the limit).
+   Needs a trained probe, and skipping layers leaves their KV unwritten for that position, which
+   the literature handles by propagating state — an approximation with real degradation.
+4. Q3_K / IQ4_XS: ~-25 % bytes, needs an audio-representative imatrix nobody has published.
+
+### Two algebraic ideas that do NOT work here, with the reason
+
+- **Low-rank factorization of the weights.** W[k x n] -> U[k x r]V[r x n] saves bytes only when
+  `r < kn/(k+n)`. For `gating.linear_in` [2048 x 8448] that threshold is **r = 1648 against a
+  maximum rank of 2048** — a 20 % rank truncation just to break even, on FFN weights that are
+  famously near full rank. The matrix shape is wrong for it.
+- **O(1) incremental attention.** Tempting, since only one position enters and one leaves the
+  window per frame, so running accumulators for `sum exp(s_j) V_j` and `sum exp(s_j)` look
+  updatable. They are not: `s_j = q_t . k_j` depends on the *current* query, so every `exp(s_j)`
+  changes each frame. This is exactly why softmax attention is irreducibly O(context) per token;
+  only linear attention gives a recurrent state, and that means retraining.
