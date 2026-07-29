@@ -915,3 +915,28 @@ context width, repack, speculation. The binding constraint is the thermal cap, a
 untested software lever against it is OpenMP (the build spins 745 seq-cst barriers per frame
 with GGML_OPENMP=OFF) — pending, needs the device back. Beyond that, meaningfully faster means
 a different compute substrate (GPU/NPU), which is currently excluded by policy.
+
+## OpenMP: 10 % slower in the sustained regime, and 15 °C hotter — rejected
+
+The last untested CPU lever. GGML_OPENMP=OFF means 745 seq-cst spin barriers per frame, which
+P6 flagged as the reason for the threads>6 cliff; OpenMP was the assumed fix.
+
+Short cooled runs (test_16k, 5 valid interleaved pairs): median ~2.5 % in OpenMP's favour, but
+the spread was 0.51–0.92 RTF for *identical* configurations — pure device noise, no verdict.
+
+Sustained regime (test_speech_90s ×2 back-to-back per arm, cooled to 42 °C before each arm,
+keep pass 2 — the same protocol that produced clean thread-sweep numbers):
+
+| arm | pass-2 RTF | end temp |
+|---|---|---|
+| spin barriers (current) | **0.719** | 57 °C |
+| OpenMP | 0.794 | **72 °C** |
+
+10 % slower and much hotter. libomp's threads also busy-wait (active wait policy), plus the
+runtime's own overhead — more power for less work, which is precisely the wrong direction
+under a thermal cap. The short-run lean and the sustained result disagree; the sustained
+regime is the one the app lives in. **GGML_OPENMP stays OFF.**
+
+With this, every CPU software lever on this list is measured: quantization at both ends,
+imatrix, kernel flags (+fp16), thread count, context width, repack, speculation, OpenMP.
+The CPU path is at its practical limit on this hardware; the constraint is the thermal cap.
