@@ -725,3 +725,95 @@ padding" from "detokenizer drops everything".
 pid 15638 went from RTF 0.74 to **4.54** with 383 dropped chunks after ~98 s. The engine is flat
 at 0.555 over 120 s and 4 sessions, so this is contention, thermal, or cpuset demotion — not the
 model. Unexplained, and not claimed as fixed by the above.
+
+---
+
+# The quantization lever is exhausted, at both ends (2026-07-29)
+
+Established earlier that this workload is bandwidth-bound on its own weights at batch 1
+(Q8_0 predicted 1.89x the bytes of Q4_K and measured 1.90x the time). The obvious follow-up
+is fewer bits. It does not work, in either the LM or the codec, and both failures are
+measured rather than argued.
+
+## LM below Q4_K: slower despite fewer bytes
+
+Added `q3_k` and `iq4_xs` to `tools/requantize_gguf`. On the 69 matmul tensors — the only ones
+whose size matters, since the 33 embedding tables are `get_rows` at one row per frame — Q4_K is
+4.5 bpw and Q3_K is 3.44, so **24 % less traffic**.
+
+Host, `test_16k`, 3 interleaved rounds (medians):
+
+| weights | file | host rtf | WER vs f16 |
+|---|---|---|---|
+| q4_k | 737 MB | **0.605** | 0.00 % |
+| iq4_xs | 712 MB | 0.677 | 1.00 % |
+| q3_k | 631 MB | 0.595 | 1.00 % |
+
+Device, `test_16k`, 3 interleaved rounds with a <45 °C cooldown before each, comparing `lm_ms`
+(Mimi is unchanged, so this isolates the effect):
+
+| weights | run 1 | run 2 | run 3 | median |
+|---|---|---|---|---|
+| q4_k | *28973* ⚠ | 10493 | 10880 | **10687 ms** |
+| q3_k | 12589 | 12249 | 16284 | **12589 ms** |
+
+⚠ first run is a cold-start outlier (`mimi_ms` 14858 vs ~5600 in every other run — the model
+is being faulted in from storage).
+
+**Q3_K is 16 % slower on device** while reading 24 % fewer bytes, and its best run (12249) is
+worse than the worst valid Q4_K run (10880). ARM's i8mm path for Q4_K beats Q3_K's, and the
+extra unpacking work costs more than the traffic saved. IQ4_XS is worse still, ~10 % slower on
+host, presumably for the same reason plus its own search.
+
+**Q4_K is the optimum on this hardware.** Bits-per-weight is only a proxy for time while the
+dequantization kernel stays as cheap; below 4.5 bpw it does not.
+
+## Codec below F16: even Q8_0 is a bad trade
+
+`STT_MIMI` was added to `stt_bench` so codec variants can be A/B'd without rewriting
+config.json. Mimi is ~35 % of per-frame compute, so it was worth sweeping separately.
+
+Host, 3 interleaved rounds, LM fixed at q4_k. `mimi_ms` medians: F16 4196, Q8_0 4005,
+Q6_K 3990 — about **5 % of Mimi, i.e. 1.7 % of total**. Against that:
+
+| codec | WER vs F16 (test_16k) | WER vs F16 (90 s) |
+|---|---|---|
+| Q8_0 | **3.03 %** | **2.01 %** |
+| Q6_K | 6.06 % | 6.02 % |
+
+Q8_0 is near-lossless on an ordinary transformer. Costing 2–3 % here **confirms the structural
+asymmetry** already recorded for Q4_K, and with a much gentler quantization: the codec feeds a
+hard argmax cascade (32 residual stages over 2048 centroids, where one flipped code propagates
+through every later stage), while the LM feeds a softmax over 8000 tokens that absorbs noise.
+1.7 % of speed for 2 % of words is not a trade worth making.
+
+**Keep the LM at Q4_K and the codec at F16.** Both are now measured optima, not defaults.
+
+## Two notes on the host harness
+
+- `config.json` in the repo points at `../moshi-common/mimi-e351c8d8-125.gguf` — the **F32**
+  codec — and sets `context: 750`. The device gets `mimi-f16.gguf` and `context: 375` because
+  `deploy_kyutai_model.sh` rewrites both. So host and device absolute RTF are not comparable;
+  only within-sweep comparisons are, and every sweep above holds its conditions fixed across
+  arms.
+- `tools/quant_sweep.sh` scores each variant's transcript against the **F16 transcript of the
+  same model**, not a human reference. That isolates quantization damage; a human reference
+  folds in the model's own errors and hides it.
+
+## What this closes
+
+Reducing weight traffic was the last cheap lever on CPU. It is now measured shut. The binding
+constraint is thermal: the platform caps `scaling_max_freq` from 3628 MHz to 1440 MHz once the
+phone passes ~65 °C, and RTF goes from 0.55 to over 1. No arrangement of bits changes the
+thermal budget — only doing less total work would, and the per-frame work is inherent (see the
+note on why padding frames cannot be skipped).
+
+## Why "early exit on padding frames" is not available
+
+Worth recording because it looks like a large win and is not one. Roughly 65 % of frames emit
+padding rather than a text token, which invites skipping their LM pass. It cannot be done: the
+model is autoregressive at a fixed rate, every frame must advance the LM's KV cache and Mimi's
+convolution ring buffers, and **it is the forward pass itself that determines the output is
+padding**. The 65 % is not waste, it is the cost of maintaining state. Skipping a frame
+corrupts everything after it. What remains is not computing the 8001-wide output head on
+padding frames, which is ~2 % of traffic.

@@ -1,0 +1,1 @@
+RESULT engine=kyutai-stt-1b audio=/home/yohann/kata/moshi.cpp/../voxtral.cpp/tests/fixtures/test_speech_90s.wav threads=6 weights=model-q8_0.gguf spec_n=1 load_ms=3786 compute_ms=91965 mimi_ms=24608 lm_ms=67357 audio_ms=90000 rtf=1.022 chars=1747

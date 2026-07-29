@@ -38,7 +38,11 @@ static void usage(const char* prog) {
     fprintf(stderr,
 "usage: %s <in.gguf> <out.gguf> <quant> [--keep-f32-embeddings] [--quantize-all]\n"
 "\n"
-"  quant   q4_0 | q4_k | q5_k | q6_k | q8_0 | f16\n"
+"  quant   q3_k | q4_0 | q4_k | iq4_xs | q5_k | q6_k | q8_0 | f16\n"
+"\n"
+"This model is bandwidth-bound on its own weights at batch 1 (Q8_0 predicted 1.89x the\n"
+"bytes of Q4_K and measured 1.90x the time), so bits-per-weight is the dominant lever on\n"
+"speed. Roughly: q3_k 3.4 bpw, iq4_xs 4.25, q4_k 4.5, q5_k 5.5, q6_k 6.6, q8_0 8.5.\n"
 "\n"
 "Default per-tensor policy:\n"
 "  *_norm* / *norm.weight / 1-D tensors  -> F32   (tiny; precision matters)\n"
@@ -54,6 +58,11 @@ static void usage(const char* prog) {
 }
 
 static ggml_type parse_quant(const char* s) {
+    if (!strcmp(s, "q3_k"))   return GGML_TYPE_Q3_K;
+    // IQ4_XS is normally paired with an importance matrix. ggml_quantize_chunk accepts a
+    // null imatrix and falls back to a plain search, which is what happens here — so judge
+    // it on the measured word error, not on its reputation.
+    if (!strcmp(s, "iq4_xs")) return GGML_TYPE_IQ4_XS;
     if (!strcmp(s, "q4_0")) return GGML_TYPE_Q4_0;
     if (!strcmp(s, "q4_k")) return GGML_TYPE_Q4_K;
     if (!strcmp(s, "q5_k")) return GGML_TYPE_Q5_K;

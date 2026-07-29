@@ -1,0 +1,112 @@
+audio: 90.0s at 16000Hz
+config: dim=2048 layers=16 n_q=32 dep_q=0 context=750 delay=0.50s
+backend: CPU
+load: 3130 ms  (/home/yohann/kata/moshi.cpp/models/Codes4Fun/stt-1b-en_fr-GGUF/model-q4_k.gguf)
+codec: 12.50 frames/s, frame_size=1920 -> 24000 Hz
+resampled 16000 -> 24000 Hz (1440000 -> 2160000 samples)
+
+=== Streaming (1125 frames + 14 tail, 6 threads) ===
+    1.0s  rtf=0.771  chars=0
+    1.9s  rtf=0.736  chars=23
+    2.9s  rtf=0.719  chars=36
+    3.8s  rtf=0.712  chars=62
+    4.8s  rtf=0.702  chars=87
+    5.8s  rtf=0.698  chars=96
+    6.7s  rtf=0.698  chars=102
+    7.7s  rtf=0.695  chars=115
+    8.6s  rtf=0.698  chars=134
+    9.6s  rtf=0.703  chars=152
+   10.6s  rtf=0.699  chars=181
+   11.5s  rtf=0.699  chars=198
+   12.5s  rtf=0.702  chars=205
+   13.4s  rtf=0.864  chars=231
+   14.4s  rtf=0.871  chars=245
+   15.4s  rtf=0.864  chars=270
+   16.3s  rtf=0.857  chars=297
+   17.3s  rtf=0.851  chars=324
+   18.2s  rtf=0.847  chars=335
+   19.2s  rtf=0.845  chars=357
+   20.2s  rtf=0.843  chars=368
+   21.1s  rtf=0.842  chars=377
+   22.1s  rtf=0.839  chars=385
+   23.0s  rtf=0.838  chars=395
+   24.0s  rtf=0.836  chars=427
+   25.0s  rtf=0.836  chars=452
+   25.9s  rtf=0.835  chars=484
+   26.9s  rtf=0.833  chars=517
+   27.8s  rtf=0.831  chars=546
+   28.8s  rtf=0.828  chars=555
+   29.8s  rtf=0.823  chars=569
+   30.7s  rtf=0.819  chars=569
+   31.7s  rtf=0.817  chars=600
+   32.6s  rtf=0.814  chars=619
+   33.6s  rtf=0.811  chars=636
+   34.6s  rtf=0.809  chars=662
+   35.5s  rtf=0.806  chars=679
+   36.5s  rtf=0.805  chars=679
+   37.4s  rtf=0.804  chars=698
+   38.4s  rtf=0.804  chars=707
+   39.4s  rtf=0.803  chars=723
+   40.3s  rtf=0.802  chars=757
+   41.3s  rtf=0.801  chars=781
+   42.2s  rtf=0.801  chars=788
+   43.2s  rtf=0.803  chars=803
+   44.2s  rtf=0.814  chars=825
+   45.1s  rtf=0.817  chars=848
+   46.1s  rtf=0.815  chars=877
+   47.0s  rtf=0.814  chars=903
+   48.0s  rtf=0.817  chars=918
+   49.0s  rtf=0.838  chars=936
+   49.9s  rtf=0.836  chars=951
+   50.9s  rtf=0.833  chars=953
+   51.8s  rtf=0.830  chars=968
+   52.8s  rtf=0.828  chars=978
+   53.8s  rtf=0.824  chars=996
+   54.7s  rtf=0.821  chars=1020
+   55.7s  rtf=0.817  chars=1064
+   56.6s  rtf=0.816  chars=1090
+   57.6s  rtf=0.814  chars=1119
+   58.6s  rtf=0.811  chars=1138
+   59.5s  rtf=0.808  chars=1152
+   60.5s  rtf=0.806  chars=1152
+   61.4s  rtf=0.803  chars=1172
+   62.4s  rtf=0.801  chars=1195
+   63.4s  rtf=0.798  chars=1213
+   64.3s  rtf=0.796  chars=1238
+   65.3s  rtf=0.794  chars=1262
+   66.2s  rtf=0.791  chars=1262
+   67.2s  rtf=0.789  chars=1274
+   68.2s  rtf=0.788  chars=1289
+   69.1s  rtf=0.786  chars=1306
+   70.1s  rtf=0.784  chars=1334
+   71.0s  rtf=0.782  chars=1356
+   72.0s  rtf=0.779  chars=1364
+   73.0s  rtf=0.777  chars=1380
+   73.9s  rtf=0.774  chars=1400
+   74.9s  rtf=0.773  chars=1422
+   75.8s  rtf=0.771  chars=1455
+   76.8s  rtf=0.769  chars=1472
+   77.8s  rtf=0.767  chars=1501
+   78.7s  rtf=0.765  chars=1511
+   79.7s  rtf=0.765  chars=1534
+   80.6s  rtf=0.763  chars=1534
+   81.6s  rtf=0.762  chars=1548
+   82.6s  rtf=0.761  chars=1551
+   83.5s  rtf=0.759  chars=1578
+   84.5s  rtf=0.758  chars=1603
+   85.4s  rtf=0.756  chars=1637
+   86.4s  rtf=0.755  chars=1665
+   87.4s  rtf=0.754  chars=1698
+   88.3s  rtf=0.752  chars=1721
+   89.3s  rtf=0.751  chars=1735
+   90.2s  rtf=0.750  chars=1735
+
+=== Results ===
+frames: 1125 (+14 tail)
+text tokens: 507, vad frames >0.5: 27
+compute: 68310 ms for 90000 ms audio = 0.759x RT
+per-frame: 59.97 ms avg (budget 80.00 ms), worst 1659.0 ms
+  mimi encoder: 17.87 ms/frame (30% of compute)
+  lm (1B)     : 42.10 ms/frame (70% of compute)
+full text:  Alors déjà, en fait, ça a déjà commencé. Parce que nous, ça fait déjà plus de deux ans qu'on s'est placé dans ce marché de liage génératif en particulier. Parce que de l'IA, on en fait depuis des décennies. Mais donc le boom de liage génératif, qui est arrivé il y a deux ans, on l'a pris tout de suite. Et donc notre enveloppe globale de 3 milliards d'euros, elle se répartit d'abord dans des investissements dans les infrastructures. On a quand même un groupe de télécom à l'origine. Donc les infrastructures, c'est notre métier. Et donc on va construire... Alors déjà, en fait, ça a déjà commencé. Parce que nous, ça fait déjà plus de deux ans qu'on s'est placé dans ce marché de liage génératif en particulier. Parce que de l'IA, on en fait depuis des décennies. Mais donc le boom de liage génératif, qui est arrivé il y a deux ans, on l'a pris tout de suite. Et donc notre enveloppe globale de 3 milliards d'euros, elle se répartit d'abord dans des investissements dans les infrastructures. On a quand même un groupe de télécom à l'origine. Donc les infrastructures, c'est notre métier. Et donc on va construire... Alors déjà, en fait, ça a déjà commencé. Parce que nous, ça fait déjà plus de deux ans qu'on s'est placé dans ce marché de liage génératif en particulier. Parce que de l'IA, on en fait depuis des décennies. Mais donc le boom de liage génératif, qui est arrivé il y a deux ans, on l'a pris tout de suite. Et donc notre enveloppe globale de 3 milliards d'euros, elle se répartit d'abord dans des investissements dans les infrastructures. On a quand même un groupe de télécom à l'origine. Donc les infrastructures, c'est notre métier. Et donc on va
+RESULT engine=kyutai-stt-1b audio=/home/yohann/kata/moshi.cpp/../voxtral.cpp/tests/fixtures/test_speech_90s.wav threads=6 weights=model-q4_k.gguf spec_n=1 load_ms=3130 compute_ms=68310 mimi_ms=20357 lm_ms=47954 audio_ms=90000 rtf=0.759 chars=1735

@@ -1,0 +1,50 @@
+audio: 30.0s at 16000Hz
+config: dim=2048 layers=16 n_q=32 dep_q=0 context=750 delay=0.50s
+backend: CPU
+load: 3869 ms  (/home/yohann/kata/moshi.cpp/models/Codes4Fun/stt-1b-en_fr-GGUF/model-q8_0.gguf)
+codec: 12.50 frames/s, frame_size=1920 -> 24000 Hz
+resampled 16000 -> 24000 Hz (480000 -> 720000 samples)
+
+=== Streaming (375 frames + 14 tail, 6 threads) ===
+    1.0s  rtf=0.682  chars=0
+    1.9s  rtf=0.622  chars=23
+    2.9s  rtf=0.623  chars=36
+    3.8s  rtf=0.679  chars=62
+    4.8s  rtf=0.685  chars=87
+    5.8s  rtf=0.675  chars=96
+    6.7s  rtf=0.667  chars=102
+    7.7s  rtf=0.661  chars=115
+    8.6s  rtf=0.656  chars=134
+    9.6s  rtf=0.656  chars=152
+   10.6s  rtf=0.657  chars=181
+   11.5s  rtf=0.654  chars=198
+   12.5s  rtf=0.653  chars=205
+   13.4s  rtf=0.651  chars=231
+   14.4s  rtf=0.651  chars=246
+   15.4s  rtf=0.649  chars=271
+   16.3s  rtf=0.648  chars=298
+   17.3s  rtf=0.647  chars=325
+   18.2s  rtf=0.647  chars=337
+   19.2s  rtf=0.646  chars=359
+   20.2s  rtf=0.646  chars=370
+   21.1s  rtf=0.645  chars=379
+   22.1s  rtf=0.644  chars=387
+   23.0s  rtf=0.644  chars=397
+   24.0s  rtf=0.643  chars=429
+   25.0s  rtf=0.643  chars=454
+   25.9s  rtf=0.643  chars=486
+   26.9s  rtf=0.643  chars=516
+   27.8s  rtf=0.643  chars=549
+   28.8s  rtf=0.642  chars=558
+   29.8s  rtf=0.642  chars=573
+   30.7s  rtf=0.642  chars=587
+
+=== Results ===
+frames: 375 (+14 tail)
+text tokens: 174, vad frames >0.5: 13
+compute: 19967 ms for 30000 ms audio = 0.666x RT
+per-frame: 51.33 ms avg (budget 80.00 ms), worst 199.8 ms
+  mimi encoder: 12.98 ms/frame (25% of compute)
+  lm (1B)     : 38.35 ms/frame (75% of compute)
+full text:  Alors déjà, en fait, ça a déjà commencé. Parce que nous, ça fait déjà plus de deux ans qu'on s'est placé dans ce marché de liage génératif en particulier. Parce que de l'IA, on en fait depuis des décennies. Mais donc, le boom de liage génératif, qui est arrivé il y a deux ans, on l'a pris tout de suite. Et donc, notre enveloppe globale de 3 milliards d'euros, elle se répartit d'abord dans des investissements dans les infrastructures. On a quand même un groupe de télécom à l'origine. Donc, les infrastructures, c'est notre métier. Et donc, on va construire...
+RESULT engine=kyutai-stt-1b audio=/home/yohann/kata/moshi.cpp/../voxtral.cpp/tests/fixtures/test_16k.wav threads=6 weights=model-q8_0.gguf spec_n=1 load_ms=3869 compute_ms=19967 mimi_ms=5049 lm_ms=14918 audio_ms=30000 rtf=0.666 chars=587

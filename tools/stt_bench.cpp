@@ -165,7 +165,13 @@ int main(int argc, char** argv) {
     moshi_lm_gen_t* gen = moshi_lm_generator(lm);
 
     const std::string tok_path  = model_dir + cfg.tokenizer_name;
-    const std::string mimi_path = model_dir + cfg.mimi_name;
+    // STT_MIMI overrides config.json's mimi_name, so codec quantizations can be A/B'd without
+    // rewriting the config between runs. Mimi is ~35 % of per-frame compute, so it is worth
+    // sweeping separately from the LM — and it responds differently, because it feeds a hard
+    // argmax cascade rather than a softmax.
+    const char* mimi_override = getenv("STT_MIMI");
+    const std::string mimi_path = model_dir + (mimi_override ? mimi_override : cfg.mimi_name);
+    if (mimi_override) printf("codec override: %s\n", mimi_override);
     tokenizer_t* tok = tokenizer_alloc(tok_path.c_str());
     mimi_codec_t* codec = mimi_alloc(moshi, mimi_path.c_str(), (int)cfg.n_q);
     if (!tok || !codec) { fprintf(stderr, "failed to load tokenizer/codec\n"); return 1; }
