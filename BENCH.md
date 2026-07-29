@@ -595,3 +595,45 @@ Measured or reasoned, best ratio first:
   updatable. They are not: `s_j = q_t . k_j` depends on the *current* query, so every `exp(s_j)`
   changes each frame. This is exactly why softmax attention is irreducibly O(context) per token;
   only linear attention gives a recurrent state, and that means retraining.
+
+---
+
+## The codec was never quantized: F32 -> F16 is free, Q4_K is not
+
+The requantizer was only ever pointed at the LM. The Mimi GGUF ships **310 MB of F32 out of
+347**: its transformer (33.6 M params), its 32 RVQ codebooks (16.8 M — read by the matvec search
+on every frame), and more.
+
+Converting the codec to F16 (347 -> 192 MB):
+
+| codec | Mimi ms (device) | RTF | word error (90 s) |
+|---|---|---|---|
+| F32 (shipped) | 5586 | 0.512 | 10.91 % |
+| **F16** | **4858** | **0.482** | **10.32 %** |
+| Q4_K | 4445 | 0.460 | **15.93 %** |
+
+F16 is a pure win: 13–20 % faster and word error *improves* slightly. Peak RSS drops
+**1352 -> 1087 MB**.
+
+**Q4_K on the codec must be rejected** despite being faster still, and the reason is structural
+rather than incidental: **the codec feeds a hard argmax cascade** — 32 residual stages each
+picking among 2048 centroids, where a small encoder error flips a code and the residual carries
+the mistake into every later stage — while **the LM feeds a soft distribution** (softmax over
+8000 tokens, where small logit perturbations rarely change the argmax). Quantize the LM
+aggressively; keep the codec at F16.
+
+### ⚠️ Methodological warning about device RTF on this phone
+
+While measuring the above, three consecutive runs of the *identical* configuration, each started
+below 45 °C, gave RTF **0.532, 0.724, 1.244** — monotonically worse. Investigated:
+
+- the real per-core sensors (`cpu-0-*`, `cpu-1-*`) read 37–38 °C, so the cores were genuinely
+  cool and `thermal_zone0` (`cpullc`) was not misleading me;
+- `cpu-hw-trip-*` reporting 95 °C is a trip *threshold*, not a reading;
+- memory was not tight (6.3 GB available, 4.8 GB cached).
+
+Most likely the platform demoting a long-running `adb shell` process into a restricted cpuset
+(cpu0/cpu4 observed at 384 MHz of 3628 while cpu7 was at 883 of 4608). **Consequence: absolute
+device RTF from a long benchmarking session is not trustworthy, and only interleaved A/Bs taken
+close together are.** The quality figures above are host-side and unaffected. Treat every
+absolute device RTF in this file as a lower bound with a wide error bar.
