@@ -1220,8 +1220,16 @@ ggml_tensor * moshi_streaming_transformer_graph_build(
     auto & pattern = m->patterns[(int)T];
     if ( ! pattern.tensor )
         create_bias_pattern( gctx.backend, pattern, capacity, (int) T, 0, -INFINITY );
+    // F16, NOT F32, and this one character was worth 24 % of device time. The pattern
+    // above is F16 precisely so the flash-attention path can consume it, but this graph
+    // placeholder was F32 — the per-frame ggml_cpy in graph_step silently converted
+    // F16 → F32, torch_sdpa_rearranged's guard (correctly) refused an F32 mask, and every
+    // layer of every frame fell back to the manual path, whose ggml_cont(transpose(V))
+    // re-materializes the whole V cache: measured 24.0 % of total device time
+    // (CONT <- TRANSPOSE [375x128x16], 16 layers x every frame) plus the un-fused softmax.
+    // The on-device per-op profiler (GGML_PROFILE=1) is what caught it.
     sgraph.attn_bias = gctx.new_tensor(
-        GGML_TYPE_F32, GGML_NE( capacity, T ) );
+        GGML_TYPE_F16, GGML_NE( capacity, T ) );
 
     // offset for timestep_embedding
     timestep_embedding_t tsemb = { NULL, NULL };

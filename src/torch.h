@@ -290,6 +290,23 @@ ggml_tensor * torch_sdpa_rearranged(
                                       scale_factor, 0.0f, 0.0f );
         return ggml_reshape_3d( ctx, x, x->ne[0] * x->ne[1], x->ne[2], x->ne[3] );
     }
+    // One-shot diagnosis: the device profile showed 24 % of ALL time in the manual path's
+    // V transpose, so if we are here, saying WHY is worth a line of stderr.
+    static bool flash_moaned = false;
+    if ( ! flash_moaned ) {
+        flash_moaned = true;
+        fprintf( stderr,
+            "sdpa: flash path OFF — q_f32=%d ktype=%s vtype=%s qnb0=%d knb0=%d vnb0=%d "
+            "bias=%s bias_cont=%d bias_type=%s\n",
+            query->type == GGML_TYPE_F32,
+            ggml_type_name( key->type ), ggml_type_name( value->type ),
+            (int)( query->nb[0] == ggml_type_size( query->type ) ),
+            (int)( key->nb[0]   == ggml_type_size( key->type ) ),
+            (int)( value->nb[0] == ggml_type_size( value->type ) ),
+            attn_bias ? "yes" : "null",
+            attn_bias ? (int)ggml_is_contiguous( attn_bias ) : -1,
+            attn_bias ? ggml_type_name( attn_bias->type ) : "-" );
+    }
 #endif
 
     auto attn_weight = ggml_mul_mat( ctx, key, query );

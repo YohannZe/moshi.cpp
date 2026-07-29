@@ -940,3 +940,90 @@ regime is the one the app lives in. **GGML_OPENMP stays OFF.**
 With this, every CPU software lever on this list is measured: quantization at both ends,
 imatrix, kernel flags (+fp16), thread count, context width, repack, speculation, OpenMP.
 The CPU path is at its practical limit on this hardware; the constraint is the thermal cap.
+
+---
+
+# "Pourquoi c'est plus lent ? C'est pas logique." — It wasn't. (2026-07-29, evening)
+
+The user pushed back on the q3_k / +fp16 / OpenMP negatives, and the pushback was right.
+If this workload were truly DRAM-bandwidth-bound, fewer bytes would always win — q3_k losing
+while reading 24 % less proves the bottleneck was **in-core work**, not the bus (we read
+~17 GB/s of a 77 GB/s bus). So something else was eating the machine, and no A/B of build
+flags was going to find it.
+
+## The profiler, since simpleperf is dead on this phone
+
+This kernel rejects every perf event, even software ones with `security.perf_harden=0`.
+So ggml-cpu gained `GGML_PROFILE=1`: thread 0 times every node, barrier-inclusive (so
+imbalance is charged to the node that causes it), detail keyed by weight name for MUL_MAT
+and by op<-producer[shape] for the rest.
+
+First profile on device, everything included (test_16k, Q4_K LM + F16 codec):
+
+| op | time | share |
+|---|---|---|
+| MUL_MAT | 9797 ms | 57.4 % |
+| **CONT** | **4572 ms** | **26.8 %** |
+| IM2COL | 573 ms | 3.4 % |
+| UNARY | 503 ms | 3.0 % |
+| ~550 k node executions total | | |
+
+And the detail line that explained the day:
+`CONT <- TRANSPOSE [375x128x16]  3687 ms  24.0 %  6224 calls` — 16 layers × 389 frames.
+
+## The bug: one dtype disarmed flash attention everywhere
+
+`torch_sdpa_rearranged` has a flash path guarded on the mask being **F16** — the guard that
+exists because ggml's FA kernel reads the mask as `ggml_fp16_t` unconditionally, and an F32
+mask silently produces garbage (the "45 % win" that was 388 whitespace characters, earlier in
+this file). `create_bias_pattern` dutifully produces an F16 mask.
+
+But the **cached-graph** builder (`moshi_streaming_transformer_graph_build`) allocated its
+per-frame mask *placeholder* as **GGML_TYPE_F32**. Each frame, `graph_step` copied the F16
+pattern into it — `ggml_cpy` converting F16→F32 on the way — and the guard then (correctly)
+refused the F32 mask. Every layer of every frame, LM and Mimi encoder both, fell back to the
+manual path: `softmax(QK^T)` un-fused plus `ggml_cont(transpose(V))` re-materializing the
+whole V cache — the path ggml itself comments "this is not optimal - fix me".
+
+**The flash path everyone believed was active since P4 had never run in the app.** The flash
+work was validated on a code path (`moshi_streaming_transformer`, non-cached) that the
+per-frame pipeline does not use.
+
+Fix: one word, `GGML_TYPE_F32` → `GGML_TYPE_F16` at the placeholder. Plus a one-shot stderr
+line in the fallback branch saying *why* flash is off, so this cannot go silent again.
+
+## Measured
+
+Host: LM 10.6→6.9 s on test_16k (−35 %), RTF 0.53→0.411.
+
+Device (interleaved, warm phone), `lm_ms` on test_16k: baseline 14830/14560/13995,
+flash 7873/8713/7368 — **LM ×1.85**. chars identical (570).
+
+Device, sustained regime (90 s ×2 back-to-back, the app's real condition):
+
+| | this morning | with flash | |
+|---|---|---|---|
+| pass 1 | 0.613–0.695 | **0.339** | |
+| pass 2 (steady, hot) | 0.606–0.719 | **0.391** | ×1.8 |
+
+chars = 1738, byte-stable across the fixture's three repetitions (the mask-correctness
+property holds after the ring wraps). The only text change anywhere is one word
+("des"→"les" + a comma), identical in all three repetitions — flash's different accumulation
+order, not a regression.
+
+The morning's reliability target — "RTF ≤ 0.35 with the phone hot" — is effectively met:
+0.39 at 70 °C, 0.34 before the SoC heats.
+
+New profile after the fix: MUL_MAT 76.6 % (compute finally goes into compute), CONT
+26.8 %→2.0 %, SOFT_MAX 6224→389 calls, FLASH_ATTN_EXT 4.4 %. The one large non-LM item left
+is Mimi's conv matmuls (`(reshaped)`, 21.5 %).
+
+## What this retracts
+
+The previous section declared "the CPU path is at its practical limit; every lever is
+measured". **Wrong, and instructively so.** Every lever *on the list* was measured — but the
+list was built from beliefs about where time went, and 24 % of the time was somewhere no
+listed lever touched. q3_k, +fp16 and OpenMP all "made no sense" because they were optimizing
+the 30 % of the machine that was actually doing matmuls, while the majority went to a memcpy
+storm none of them affected. The profile, not the lever list, is the ground truth. Profile
+first; the lever list comes second.
