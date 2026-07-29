@@ -6,7 +6,7 @@
 # of the file used to make the whole tools/ directory unconfigurable for arm64. They were
 # therefore compiled by hand outside cmake — which is how a stale stt_bench binary once got
 # pushed to the phone and measured as if it were current. Never again: they are targets.
-foreach(tool stt_bench bench_batch requantize_gguf)
+foreach(tool stt_bench stt_eval bench_batch requantize_gguf)
     add_executable(${tool} ${tool}.cpp)
     target_link_libraries(${tool} PRIVATE moshi ${GGML_LIBRARIES} ${SentencePiece_LIBRARIES})
     target_include_directories(${tool} PRIVATE
