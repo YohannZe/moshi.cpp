@@ -1,4 +1,28 @@
 
+# --- Tools that need nothing but libmoshi + ggml -----------------------------------------
+#
+# Declared first, and before any find_package, because these are the ones that matter for
+# Android: neither SDL2 nor FFmpeg cross-compiles into this tree, so a `REQUIRED` at the top
+# of the file used to make the whole tools/ directory unconfigurable for arm64. They were
+# therefore compiled by hand outside cmake — which is how a stale stt_bench binary once got
+# pushed to the phone and measured as if it were current. Never again: they are targets.
+foreach(tool stt_bench bench_batch requantize_gguf)
+    add_executable(${tool} ${tool}.cpp)
+    target_link_libraries(${tool} PRIVATE moshi ${GGML_LIBRARIES} ${SentencePiece_LIBRARIES})
+    target_include_directories(${tool} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${GGML_INCLUDE_DIRS}
+        ${SentencePiece_INCLUDE_DIRS}
+    )
+    setup_rpath(${tool})
+endforeach()
+
+# --- Upstream's tools, which do need SDL2 (audio out) and FFmpeg (decoding) --------------
+option(MOSHI_TOOLS_MEDIA "moshi: build the SDL2/FFmpeg tools" ON)
+if (NOT MOSHI_TOOLS_MEDIA)
+    return()
+endif()
+
 find_package(SDL2 REQUIRED)
 find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFILTER AVFORMAT AVUTIL SWRESAMPLE)
 

@@ -23,3 +23,7 @@ models/
 build/
 build-android/
 build-android-cl/
+third_party/
+build-android/
+build-android-cl/
+models/

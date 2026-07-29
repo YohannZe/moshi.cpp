@@ -188,6 +188,10 @@ int main(int argc, char** argv) {
     }
 
     mimi_encode_context_t* enc = mimi_encode_alloc_context(codec);
+    // STT_RESET_FIRST reproduces what the app does: KyutaiLocalClient.streamReset() is called
+    // before the first frame. The bench never did, which is exactly how a reset regression
+    // could pass every bench run and still break the app.
+    if (getenv("STT_RESET_FIRST")) { printf("reset before first frame\n"); mimi_encode_reset(enc); }
     moshi_lm_start(moshi, gen, cfg.lm_gen_config.temp, cfg.lm_gen_config.temp_text);
 
     // Feed frame by frame — exactly what the JNI layer would do.
@@ -210,6 +214,21 @@ int main(int argc, char** argv) {
     long lm_passes = 0, spec_accepted = 0;
     // Audio tokens for frames encoded but not yet consumed by the LM.
     std::vector<std::vector<int16_t>> pending_frames;
+
+    // STT_SESSIONS replays the audio N times through ONE context, with exactly the sequence
+    // the app performs between two capture sessions: the tail silence (KyutaiLocalClient
+    // .streamFlush) followed by a codec-only reset (.streamReset, which deliberately keeps
+    // the LM context). Chasing sessions that produced zero text needs this, because a
+    // single-session bench cannot see a state problem that only appears on session 2.
+    const int sessions = getenv("STT_SESSIONS") ? std::max(1, atoi(getenv("STT_SESSIONS"))) : 1;
+    std::vector<size_t> session_chars;
+
+    for (int s = 0; s < sessions; s++) {
+    if (s > 0) {
+        mimi_encode_reset(enc);
+        printf("\n--- session %d: codec reset, LM context kept (as the app does)\n", s + 1);
+    }
+    const size_t chars_at_session_start = full_text.size();
 
     for (int i = 0; i < n_frames + tail_frames; i++) {
         float* frame = (i < n_frames) ? (audio.data() + (size_t)i * frame_size)
@@ -278,9 +297,19 @@ int main(int argc, char** argv) {
                    full_text.size());
         }
     }
+    session_chars.push_back(full_text.size() - chars_at_session_start);
+    }
 
+    // Every duration below is over the audio actually processed, i.e. sessions x the file.
+    const double audio_total_sec = audio_sec * sessions;
     const double frame_ms_budget = 1000.0 / frame_rate;
     printf("\n=== Results ===\n");
+    if (sessions > 1) {
+        printf("chars per session:");
+        for (size_t s = 0; s < session_chars.size(); s++)
+            printf(" %zu", session_chars[s]);
+        printf("   (identical audio each time -- any drop is a state bug)\n");
+    }
     printf("frames: %d (+%d tail)\n", n_frames, tail_frames);
     printf("text tokens: %d, vad frames >0.5: %d\n", text_tokens, vad_hits);
     if (spec_n > 1)
@@ -288,7 +317,7 @@ int main(int argc, char** argv) {
                "(ideal %d)\n", lm_passes, spec_accepted,
                (double)spec_accepted / lm_passes, spec_n);
     printf("compute: %.0f ms for %.0f ms audio = %.3fx RT\n",
-           compute_ms, audio_sec * 1000.0, compute_ms / (audio_sec * 1000.0));
+           compute_ms, audio_total_sec * 1000.0, compute_ms / (audio_total_sec * 1000.0));
     const int total_frames = n_frames + tail_frames;
     printf("per-frame: %.2f ms avg (budget %.2f ms), worst %.1f ms\n",
            compute_ms / total_frames, frame_ms_budget, worst_frame_ms);
@@ -301,7 +330,7 @@ int main(int argc, char** argv) {
            "spec_n=%d load_ms=%.0f compute_ms=%.0f mimi_ms=%.0f lm_ms=%.0f "
            "audio_ms=%.0f rtf=%.3f chars=%zu\n",
            audio_path, threads, model_override ? model_override : cfg.moshi_name.c_str(),
-           spec_n, load_ms, compute_ms, mimi_ms, lm_ms, audio_sec * 1000.0,
-           compute_ms / (audio_sec * 1000.0), full_text.size());
+           spec_n, load_ms, compute_ms, mimi_ms, lm_ms, audio_total_sec * 1000.0,
+           compute_ms / (audio_total_sec * 1000.0), full_text.size());
     return 0;
 }
