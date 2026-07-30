@@ -35,7 +35,9 @@ device = sys.argv[3] if len(sys.argv) > 3 else "cpu"
 # run is about QUALITY of the reference, not its speed.
 dtype = torch.float32 if len(sys.argv) <= 4 else getattr(torch, sys.argv[4])
 
-torch.set_num_threads(6)
+# REF_THREADS: torch CPU streaming at batch 1 usually saturates around 6-8 threads, but
+# with the machine to itself 12 is worth measuring — resume makes the experiment free.
+torch.set_num_threads(int(os.environ.get("REF_THREADS", "6")))
 
 done = set()
 if os.path.exists(out_path):

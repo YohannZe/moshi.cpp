@@ -1098,3 +1098,29 @@ from a human filling gaps.
 - Device RTF on FLEURS (host RTF above is not the deployment number).
 - Battery. Nobody ships an RTF; they ship hours.
 - Verify the whisper literature numbers above before citing them.
+
+## Device RTF and WER on FLEURS (2026-07-30)
+
+Stratified subset (every 6th file, 113 utterances, 1180 s) on the Poco F8 Ultra, Q4_K,
+6 threads, back-to-back with no cooldown — deliberately the harshest regime:
+
+| segment | conditions | RTF |
+|---|---|---|
+| files 1–76 | warming to full throttle (cap hits 1.44 GHz) | 0.68–0.75 |
+| files 77–113 | saturated at the thermal floor | **0.98** |
+
+So the honest worst case is: after ~15 min of *continuous saturated* compute, the device
+approaches RTF 1.0. The app's real duty cycle is gentler (it computes ~0.5 s per 1 s of
+audio, leaving thermal headroom), which is why real app sessions sustain 0.75–0.78. Both
+numbers belong in the paper: bench-saturated 0.98, app-realistic 0.75.
+
+Quality on device: **11.58 % WER** vs 11.45 % for the host on the same 113 files — inside
+the ±0.2 pt session-variance band. Per-file texts differ because deployment-mode outputs
+depend on the LM context chain, and the device session chained only the subset while the
+host chained all 676; quality equivalence is the meaningful invariant (byte-identity was
+already proven under identical session structure: F16 twice, 24 h apart, same S/I/D to the
+digit).
+
+Also worth recording: the Q4_K host re-run after the crash resume scored 11.61 % vs 11.40 %
+for the unbroken chain — deployment-mode WER carries ~±0.2 pt of variance from session
+segmentation alone. Quote FLEURS numbers with that error bar.
