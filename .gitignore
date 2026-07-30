@@ -27,3 +27,4 @@ third_party/
 build-android/
 build-android-cl/
 models/
+eval-data/
