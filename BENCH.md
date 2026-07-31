@@ -1158,3 +1158,26 @@ noise in the other direction; the gap at 676 is consistent with the early lead.
 The paper claim this supports, conservatively phrased: *matches or exceeds the reference
 implementation's accuracy on FLEURS-fr while running 8.6x faster on the same CPU, and in
 real time on a phone.*
+
+## Serving-protocol sweep (113-file FLEURS subset, one variable per arm, 2026-07-30)
+
+| arm | WER | S/I/D | verdict |
+|---|---|---|---|
+| base (tail+8) | 11.45 % | 235/75/31 | |
+| tail+16 | **10.78 %** | 228/70/23 | adopt — trailing words arrive well past the 0.5 s delay |
+| prefix 6 frames | **10.71 %** | 225/66/28 | adopt for utterance mode — codec conv settle time |
+| prefix 12 | 12.25 % | D=66 | too much silence hurts; reject |
+| **raw −46 dBFS, no AGC** | **22.36 %** | D=305 | the level cliff, reproduced |
+| **raw −46 dBFS + causal AGC** | **11.41 %** | 232/64/44 | **AGC recovers ALL 11 points, online** |
+| normalized + AGC | 11.08 % | 235/67/28 | no harm on healthy audio — safe always-on |
+| combo (tail16+prefix6+AGC) | **10.94 %** | 235/65/26 | −0.5 pt vs base, zero engine changes |
+| LM q4_k + imatrix | 12.66 % | D=68 | **imatrix HURTS the LM** (2-min calibration set skews the 8000-token head); imatrix is codec-only |
+| codec encoder-transformer Q8 | 11.92 % | | +0.5 WER; reject per the standing rule |
+
+Structural finding: the codec's convolutions cannot be block-quantized at all — stored
+[kernel, Cin, Cout] with ne[0]=3..7, below every block size. The 21.5 % conv share keeps F16.
+
+Shipped to the app: causal AGC in the JNI feed path + flush tail +16 + the mute-lock
+watchdog (semantic VAD active, no text 8 s → codec reset). Session-serving WER at these
+settings: **~10.9 %** — better than every number in yesterday's table, and 1.7 pts ahead of
+the reference implementation.
