@@ -1195,3 +1195,43 @@ the reference implementation.
 
 Final paper table: reference 12.62 % / this port, tuned serving, Q4_K: **11.29 %** — 1.33
 points ahead at 8.6x the speed.
+
+# Revisiting closed verdicts after the flash fix (2026-07-31)
+
+Two levers re-tested on the post-flash engine, both verdicts changed. The meta-lesson: a
+performance verdict is only valid for the machine it was measured on, and the flash fix made
+it a different machine.
+
+## Speculation: rejected before, wins ~8 % now
+
+STT_SPEC_N=2: host RTF 0.326→0.297, spec=3 → 0.294, transcript identical (570 chars). The
+original "correct but not faster" verdict was measured when manual attention dominated the
+step; with flash on, the LM pass it amortizes is twice as cheap and the batching overhead
+now pays. Not yet in the app (the JNI feeds frame-by-frame; batching 2 frames adds 80 ms
+latency and needs the step_batch API — next session).
+
+## GGML_LLAMAFILE (tinyBLAS): OFF since day one, never tested — Mimi −20 %
+
+The conv share of the profile (21.5 %) turned out to be GEMM compute, not weight bytes: the
+im2col gives conv matmuls many columns, so quantizing conv weights was the wrong lever even
+where the [k≤7, Cin, Cout] storage layout allowed it (it doesn't — but the reshape-to-2D
+storage idea died for the deeper reason, not the layout one). The right lever for F16 GEMM
+is llamafile's tinyBLAS, which both android and host builds had OFF.
+
+Host: mimi_ms ~4200→3400 (−20 %), total RTF 0.32→0.29. Stacked with spec=2: **0.279**.
+Numerics shift (chars 570→588) but WER holds: 10.98 % on the subset, inside the
+10.8–11.1 band of its comparators. Android libs rebuilt with LLAMAFILE=ON — **device A/B
+pending, phone disconnected**; do not ship to jniLibs until measured on the phone.
+
+## Multi-stream batching: the map (next session's work)
+
+Goal: N streams in lockstep through one engine — the eval N× faster, and the app could run
+kyutai on mic AND system audio with one weight read. Plumbing found:
+- KV caches already carry a batch dim (`ne[3]`), `batch_size=1` hardcoded only at
+  `moshi_smha_state` (transformer.h:332) and plumbed cleanly from there.
+- FA mask broadcasting over batch already legal (`q->ne[3] % mask->ne[3] == 0`).
+- The real work: per-stream text-token feedback in `moshi_lmgen_state` (currently scalar),
+  batch dim through the embed path (lm.h:570 text_token_embed), per-stream Mimi encode
+  contexts (cheap, already per-context), and a `moshi_lm_send2_batch/receive2_batch` API.
+- Constraint to accept: streams advance in lockstep (same offset/RoPE/mask) — fine for eval
+  and for the dual-stream app case.
