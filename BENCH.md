@@ -1235,3 +1235,13 @@ kyutai on mic AND system audio with one weight read. Plumbing found:
   contexts (cheap, already per-context), and a `moshi_lm_send2_batch/receive2_batch` API.
 - Constraint to accept: streams advance in lockstep (same offset/RoPE/mask) — fine for eval
   and for the dual-stream app case.
+
+## llamafile on device: RTF 0.317 cold / 0.327 sustained at 71 °C — shipped (2026-07-31)
+
+Cooled interleaved A/B (test_16k): baseline 0.554 vs llamafile **0.317**, and the LM itself
+halves (lm_ms 10.8 s → 5.3 s — tinyBLAS accelerates far more than the conv GEMMs on ARM).
+Transcript identical in all rounds (570 chars; unlike host, device numerics did not shift).
+Sustained (90 s ×2): pass 2 **0.327 at 71 °C** — better than yesterday's 0.391, at the
+thermal floor. Shipped to the app via build.sh (hash-verified staging).
+
+Device RTF history, same fixture, three days: 2.99 → 0.98 → 0.68 → 0.55 → 0.39 → **0.32**.
