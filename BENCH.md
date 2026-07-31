@@ -1181,3 +1181,17 @@ Shipped to the app: causal AGC in the JNI feed path + flush tail +16 + the mute-
 watchdog (semantic VAD active, no text 8 s → codec reset). Session-serving WER at these
 settings: **~10.9 %** — better than every number in yesterday's table, and 1.7 pts ahead of
 the reference implementation.
+
+## Serving tuning at full scale (676, 2026-07-30 evening)
+
+- tail+24 on the subset: 11.51 % — WORSE than +16 (10.78 %). The flush is a window, not a
+  dial: too little truncates utterance ends, too much degrades the next utterance through
+  the context chain. **tail+16 is the final setting.**
+- Combo (tail16 + prefix6 + AGC) on all 676: **11.29 %** vs 11.40 base — deletions down 23 %
+  (284→218), exactly where the flush acts. The 113-file subset had flattered the combo
+  (10.94 %); full scale is the number that goes in the paper.
+- End-of-utterance analysis: the reference truncates 112/674 utterances (219 final words);
+  we truncate 89 (160) at tail8 — the located, causal share of the reference gap.
+
+Final paper table: reference 12.62 % / this port, tuned serving, Q4_K: **11.29 %** — 1.33
+points ahead at 8.6x the speed.
