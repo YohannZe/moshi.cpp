@@ -40,7 +40,7 @@
 static void usage(const char* prog) {
     fprintf(stderr,
 "usage: %s <in.gguf> <out.gguf> <quant> [--keep-f32-embeddings] [--quantize-all]\n"
-"          [--imatrix <file>]\n"
+"          [--imatrix <file>] [--override <substr>=<type> ...]\n"
 "\n"
 "  quant   q3_k | q4_0 | q4_k | iq4_xs | q5_k | q6_k | q8_0 | f16\n"
 "\n"
@@ -56,6 +56,11 @@ static void usage(const char* prog) {
 "\n"
 "  --keep-f32-embeddings  leave embedding tables at F32 instead of F16\n"
 "  --quantize-all         also quantize embedding tables to <quant>\n"
+"  --override <s>=<t>     force tensors whose name contains <s> to type <t> (repeatable,\n"
+"                         first match wins, checked before the default policy). This is\n"
+"                         how per-GROUP sensitivity gets measured: e.g. quantize only the\n"
+"                         codec's convolutions and keep the fragile RVQ cascade at F16:\n"
+"                           --override conv=q8_0 --override embedding=f16\n"
 "  --imatrix <file>       importance-weighted quantization: per-column E[x^2] collected\n"
 "                         from real audio (MOSHI_IMATRIX=<file> on any moshi run). Without\n"
 "                         it, quantization minimizes error on the weights; with it, on the\n"
@@ -136,9 +141,19 @@ int main(int argc, char** argv) {
 
     bool keep_f32_emb = false, quantize_all = false;
     std::map<std::string, std::vector<float>> imatrix;
+    std::vector<std::pair<std::string, ggml_type>> overrides;
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--keep-f32-embeddings")) keep_f32_emb = true;
         else if (!strcmp(argv[i], "--quantize-all"))   quantize_all = true;
+        else if (!strcmp(argv[i], "--override") && i + 1 < argc) {
+            std::string ov = argv[++i];
+            auto eq = ov.find('=');
+            if (eq == std::string::npos) usage(argv[0]);
+            overrides.push_back({ ov.substr(0, eq),
+                                  ov.substr(eq + 1) == "f16" ? GGML_TYPE_F16
+                                : ov.substr(eq + 1) == "f32" ? GGML_TYPE_F32
+                                : parse_quant(ov.substr(eq + 1).c_str()) });
+        }
         else if (!strcmp(argv[i], "--imatrix") && i + 1 < argc) {
             imatrix = moshi_imatrix_load(argv[++i]);
             if (imatrix.empty()) { fprintf(stderr, "error: empty imatrix\n"); return 1; }
@@ -179,7 +194,13 @@ int main(int argc, char** argv) {
         // --- decide the target type ---
         ggml_type dst_type;
         const char* why;
-        if (is_norm_like(n, src)) {
+        const std::pair<std::string, ggml_type>* ov_hit = nullptr;
+        for (auto& ov : overrides)
+            if (n.find(ov.first) != std::string::npos) { ov_hit = &ov; break; }
+        if (ov_hit && !is_norm_like(n, src)) {
+            // Overrides never touch norms/1-D: quantizing per-channel scales is always wrong.
+            dst_type = ov_hit->second;                    why = "override";
+        } else if (is_norm_like(n, src)) {
             dst_type = GGML_TYPE_F32;                     why = "norm/1d";
         } else if (is_embedding_like(n) && !quantize_all) {
             dst_type = keep_f32_emb ? GGML_TYPE_F32 : GGML_TYPE_F16;

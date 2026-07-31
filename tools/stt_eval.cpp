@@ -15,7 +15,20 @@
 // usage: stt_eval <model_dir> <list.txt> [threads] [model_gguf]
 //   list.txt   one absolute WAV path per line (16-bit PCM mono, any rate)
 //   STT_MIMI   overrides the codec file, as in stt_bench
+//
+// Serving-protocol knobs (the WER-relevant layer -- these, not the engine, are where our
+// port beats the reference implementation, so they deserve to be sweepable):
+//   STT_TAIL_EXTRA=n   silence frames flushed beyond the theoretical delay (default 8).
+//                      The reference script flushes ceil(delay*fps)=7 total and strands
+//                      trailing words; we default to delay+8=14.
+//   STT_PREFIX=n       silence frames fed before each utterance (default 0).
+//   STT_AGC=1          causal automatic gain control on the input, per frame: tracks a
+//                      decaying peak envelope and scales toward -3 dBFS. Exists because a
+//                      neural-codec STT is input-gain sensitive (FLEURS at -46 dBFS: 17.6%
+//                      WER raw vs 11.4% normalized) and a real capture pipeline cannot
+//                      normalize offline. Same algorithm as the app's JNI layer.
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -144,7 +157,12 @@ int main(int argc, char** argv) {
     const float frame_rate = mimi_frame_rate(codec);
     const int   frame_size = mimi_frame_size(codec);
     const int   codec_rate = (int)(frame_rate * frame_size + 0.5f);
-    const int   tail_frames = (int)(cfg.stt_config.audio_delay_seconds * frame_rate) + 8;
+    const int   tail_extra = getenv("STT_TAIL_EXTRA") ? atoi(getenv("STT_TAIL_EXTRA")) : 8;
+    const int   tail_frames = (int)(cfg.stt_config.audio_delay_seconds * frame_rate) + tail_extra;
+    const int   prefix_frames = getenv("STT_PREFIX") ? atoi(getenv("STT_PREFIX")) : 0;
+    const bool  agc_on = getenv("STT_AGC") && getenv("STT_AGC")[0] == '1';
+    fprintf(stderr, "serving: tail=%d (delay+%d) prefix=%d agc=%d\n",
+            tail_frames, tail_extra, prefix_frames, agc_on);
 
     mimi_encode_context_t* enc = mimi_encode_alloc_context(codec);
     moshi_lm_start(moshi, gen, cfg.lm_gen_config.temp, cfg.lm_gen_config.temp_text);
@@ -165,12 +183,31 @@ int main(int argc, char** argv) {
 
         mimi_encode_reset(enc);   // fresh conv state per utterance; LM context persists
 
+        // Causal AGC. A one-pole peak envelope with fast attack (a loud sample raises the
+        // envelope immediately) and slow release (~4 s to halve), gain aimed at -3 dBFS
+        // peak, capped at 40x so digital silence is not amplified into hiss. Causal by
+        // construction: the gain applied to a sample depends only on past samples, so the
+        // identical code can run in the live capture path.
+        if (agc_on) {
+            static float env = 0.f;                  // persists across files, like a live stream
+            const float target = 0.7f, gmax = 40.f;
+            const float release = expf(-1.f / (4.f * codec_rate));  // per-sample decay
+            for (size_t i = 0; i < audio.size(); i++) {
+                const float a = fabsf(audio[i]);
+                env = a > env ? a : env * release;
+                const float g = env > 1e-4f ? (target / env < gmax ? target / env : gmax)
+                                            : gmax;
+                audio[i] *= g;
+            }
+        }
+
         const int n_frames = (int)(audio.size() / frame_size);
         std::string text;
         auto t0 = std::chrono::steady_clock::now();
-        for (int i = 0; i < n_frames + tail_frames; i++) {
-            float* frame = (i < n_frames) ? (audio.data() + (size_t)i * frame_size)
-                                          : silence.data();
+        for (int i = -prefix_frames; i < n_frames + tail_frames; i++) {
+            float* frame = (i >= 0 && i < n_frames)
+                               ? (audio.data() + (size_t)i * frame_size)
+                               : silence.data();
             mimi_encode_send(enc, frame);
             mimi_encode_receive(enc, tokens.data());
             moshi_lm_send2(gen, tokens);
