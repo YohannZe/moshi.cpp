@@ -1245,3 +1245,24 @@ Sustained (90 s ×2): pass 2 **0.327 at 71 °C** — better than yesterday's 0.3
 thermal floor. Shipped to the app via build.sh (hash-verified staging).
 
 Device RTF history, same fixture, three days: 2.99 → 0.98 → 0.68 → 0.55 → 0.39 → **0.32**.
+
+## RVQ-in-plain-C: attempted, measured slower, reverted (2026-07-31)
+
+Hypothesis: after tinyBLAS, the small-op storm dominates, and the RVQ cascade (32 sequential
+stages x ~8 nodes) is its densest knot — so run it in plain C outside the graph, no
+dispatches, no barriers. Implemented (graph split at the latent, codebooks dequantized once,
+scalar C cascade), measured: mimi_ms 3.4 s -> 6.0 s. **Slower.** A single scalar core loses
+to the graph's 6-thread tinyBLAS matvecs by more than the barriers cost; and the storm is
+not RVQ-concentrated anyway — 119k MUL calls spread across the whole network say the
+per-node overhead is diffuse. Reverted (chars had also shifted 588 -> 584, F32-book
+numerics).
+
+What the attempt taught: the remaining overhead is the graph *machinery itself* spread over
+~550k tiny nodes, and the fixes that respect that are global — fewer nodes (op fusion) or
+more work per node (multi-stream batching) — not relocating one subgraph. Reinforces batch
+as the right next move.
+
+Quantization ranking re-verified under tinyBLAS on device: Q4_K 5.4 s < Q4_0 6.3 s <
+Q8_0 8.7 s (lm_ms). Same order as under the generic kernels; the question stays closed.
+
+Host state after the day: RTF 0.275 (was 0.677 at yesterday's dawn — 2.5x in one day).
