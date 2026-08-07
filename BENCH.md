@@ -1306,3 +1306,25 @@ unset.
   and reset edge cases closed.
 - Watchdog v2: 12 *consecutive* speech-chunks with no text (instantaneous-VAD version caught
   two radio jingles in 40 min).
+
+## Confidence-gated ensemble: sub-10 at 1.4x, not 5x (2026-08-07)
+
+The 5x ROVER cost is not a fatality — it was uniform spending on non-uniform uncertainty.
+The text logits are already host-side, so each word decision's top1−top2 margin is free;
+per-utterance hesitation (count of decisions with margin < 2) gates which utterances get the
+other 4 ensemble members. Cost-quality curve (subset, primary = t16p8):
+
+| gated % | cost | WER |
+|---|---|---|
+| 0 % | 1.00x | 10.31 % |
+| **10 %** | **1.40x** | **9.94 %** |
+| 100 % | 5.00x | 9.63 % |
+
+Re-decoding only the 10 % least-confident utterances crosses sub-10 at 1.4x — more than half
+the full-ensemble gain for 8 % of its extra cost. The margin signal predicts where votes
+differ, which is the draft/verify economics of speculative decoding transposed to decoding
+confidence. At 1.4x, device RTF ≈ 0.45: phone-viable as a post-utterance refinement.
+
+Instrumentation: MOSHI_MARGIN=1 (text_bias.h), CONF lines in stt_eval, curve in
+tools/gated_ensemble.py — the curve itself needs no new engine compute once the ensemble
+members exist.

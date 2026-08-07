@@ -41,6 +41,7 @@
 #include <ggml-backend.h>
 #include <ggml-cpu.h>
 #include <moshi/moshi.h>
+#include "../src/moshi/models/text_bias.h"
 
 static bool load_wav(const char* path, std::vector<float>& out, int& sample_rate) {
     out.clear();
@@ -182,6 +183,7 @@ int main(int argc, char** argv) {
         total_audio_s += (double)audio_in.size() / in_rate;
 
         mimi_encode_reset(enc);   // fresh conv state per utterance; LM context persists
+        moshi_margin_reset();
 
         // Causal AGC. A one-pole peak envelope with fast attack (a loud sample raises the
         // envelope immediately) and slow release (~4 s to halve), gain aimed at -3 dBFS
@@ -222,6 +224,11 @@ int main(int argc, char** argv) {
         const char* base = strrchr(files[fi].c_str(), '/');
         base = base ? base + 1 : files[fi].c_str();
         printf("HYP\t%s\t%s\n", base, text.c_str());
+        if (getenv("MOSHI_MARGIN")) {
+            float mn, mean; int n, n_low;
+            moshi_margin_stats(&mn, &mean, &n, &n_low);
+            printf("CONF\t%s\t%.3f\t%.3f\t%d\t%d\n", base, mn, mean, n, n_low);
+        }
         fflush(stdout);
         if ((fi + 1) % 25 == 0)
             fprintf(stderr, "  %zu/%zu  rtf=%.3f\n", fi + 1, files.size(),
