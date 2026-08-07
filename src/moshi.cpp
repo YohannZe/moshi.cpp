@@ -35,6 +35,7 @@
 #include "../src/moshi/modules/transformer.h"
 #include "../src/moshi/utils/sampling.h"
 #include "../src/moshi/models/lm_utils.h"
+#include "../src/moshi/models/text_bias.h"
 #include "../src/moshi/models/lm.h"
 #include "../src/moshi/quantization/core_vq.h"
 #include "../src/moshi/quantization/vq.h"

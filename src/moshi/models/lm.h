@@ -1056,6 +1056,9 @@ bool moshi_lmgen_step(
     graph.compute();
 
     int text_token = moshi_argmax_host( lm_states->sampler_out );
+    // Optional greedy shallow fusion (MOSHI_TEXT_BIAS): re-ranks real tokens only, never the
+    // pad-vs-word decision. See text_bias.h.
+    text_token = moshi_text_bias_pick( lm_states->sampler_out, text_token );
 #endif
 
     // on_text_hook

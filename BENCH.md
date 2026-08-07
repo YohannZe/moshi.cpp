@@ -1266,3 +1266,43 @@ Quantization ranking re-verified under tinyBLAS on device: Q4_K 5.4 s < Q4_0 6.3
 Q8_0 8.7 s (lm_ms). Same order as under the generic kernels; the question stays closed.
 
 Host state after the day: RTF 0.275 (was 0.677 at yesterday's dawn — 2.5x in one day).
+
+---
+
+# The sub-10 push (2026-08-07): 9.67 % WER on the subset via serving + ensemble
+
+Target set by the user: below 10 %. Reached, model untouched. The ladder (113-file subset):
+
+| step | WER | what it is |
+|---|---|---|
+| linear-resample baseline | 11.45 % | where the week started |
+| **windowed-sinc resampling** (julius) | **10.61 %** | −0.84 alone: linear 16→24 kHz folds
+aliasing into the band. The single biggest quality lever found since AGC. |
+| + tail16 + prefix8 | **10.31 %** | interactions are real: tail16 *hurts* on the sinc base
+alone (11.11) and prefix rescues it; on the linear base tail16 helped alone. Serving
+parameters must be tuned jointly, on the final audio path. |
+| ROVER, 3 systems | 10.04 % | word-level majority vote across perturbed configs |
+| **ROVER, 5 systems** | **9.67 %** | {t16p8, t16p6-F16, t8-F16, t8p4, t16p4} — decorrelated
+by tail/prefix/precision. Test-time compute ×5; the quality-ceiling row, not the deployed
+config. |
+
+Full-676 confirmation pipeline running (the subset also *selected* these configs, so the
+full set is the honest validation).
+
+## Negative: greedy bigram shallow fusion — hurts (11.65 / 11.98 vs 10.61)
+
+NGPU-LM-style fusion (arXiv:2505.22857) implemented end-to-end: text logits were already
+host-side (lm_states->sampler_out), the hook re-ranks real tokens only (never the pad-vs-word
+decision), λ ∈ {0.3, 0.5}, bigram from FLEURS-fr *train* (3 193 sentences, 30 511 bigrams).
+Even so constrained, it degrades: the model's implicit LM (trained on far more French than
+3 k sentences) is strictly stronger than the explicit bigram, so every disagreement the
+fusion wins is more likely wrong than right. λ=1.0 on the fixture visibly breaks morphology
+("s'est blessé" for "s'est placé"). The mechanism needs a corpus 2-3 orders of magnitude
+larger to have a chance; kept behind MOSHI_TEXT_BIAS (off by default), hook cost is nil when
+unset.
+
+## Also shipped to the app this session
+- Speculation (spec=2) in the JNI: −8 % device compute, +80 ms text latency, odd-frame flush
+  and reset edge cases closed.
+- Watchdog v2: 12 *consecutive* speech-chunks with no text (instantaneous-VAD version caught
+  two radio jingles in 40 min).
