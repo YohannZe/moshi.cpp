@@ -15,6 +15,15 @@ with a reboot, taking a 6-hour run's harness with it.
 setup:  python3 -m venv venv && venv/bin/pip install moshi julius soundfile
 usage:  ref_eval.py <list.txt> <out.tsv> [device] [dtype]
 
+Serving knobs, for the apples-to-apples grid against the port (the headline comparison
+confounds engine, precision, tail flush and LM context unless these are matched):
+  REF_TAIL_EXTRA=N    extra silence frames appended AFTER the default delay flush of
+                      ceil(delay*fps) = 7. The port's default flush is int(delay*fps)+8
+                      = 14 frames, so REF_TAIL_EXTRA=7 matches the port's default and
+                      REF_TAIL_EXTRA=15 matches the port's tail16 serving config.
+  REF_PREFIX_FRAMES=N override the silence prefix in frames (default: config prefix_s,
+                      0.0 s for this model). The port's prefix6 = REF_PREFIX_FRAMES=6.
+
 Hypotheses append to <out.tsv> with flush after each file, and files already present
 in <out.tsv> are skipped — so an interrupted run RESUMES instead of restarting.
 """
@@ -55,7 +64,11 @@ lm_gen = moshi.models.LMGen(lm, temp=0, temp_text=0.0)
 prefix_s = info.stt_config.get("audio_silence_prefix_seconds", 1.0)
 delay_s = info.stt_config.get("audio_delay_seconds", 5.0)
 pad_id = info.raw_config.get("text_padding_token_id", 3)
-print(f"prefix={prefix_s}s delay={delay_s}s pad_id={pad_id} dtype={dtype}", file=sys.stderr)
+tail_extra = int(os.environ.get("REF_TAIL_EXTRA", "0"))
+prefix_override = os.environ.get("REF_PREFIX_FRAMES")
+print(f"prefix={prefix_s}s delay={delay_s}s pad_id={pad_id} dtype={dtype} "
+      f"tail_extra={tail_extra} prefix_frames={prefix_override or 'config'}",
+      file=sys.stderr)
 
 files = [l.strip() for l in open(list_path) if l.strip()]
 files = [f for f in files if os.path.basename(f) not in done]
@@ -71,8 +84,9 @@ for fi, path in enumerate(files):
             audio, (0, mimi.frame_size - audio.shape[-1] % mimi.frame_size))
     total_audio += audio.shape[-1] / mimi.sample_rate
 
-    n_prefix = math.ceil(prefix_s * mimi.frame_rate)
-    n_suffix = math.ceil(delay_s * mimi.frame_rate)
+    n_prefix = int(prefix_override) if prefix_override is not None \
+        else math.ceil(prefix_s * mimi.frame_rate)
+    n_suffix = math.ceil(delay_s * mimi.frame_rate) + tail_extra
     silence = torch.zeros((1, 1, mimi.frame_size), dtype=torch.float32, device=device)
     chunks = itertools.chain(
         itertools.repeat(silence, n_prefix),

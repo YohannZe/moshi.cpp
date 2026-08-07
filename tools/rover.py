@@ -5,21 +5,25 @@ Rationale (the sub-10 push): greedy streaming decoding commits to one token per 
 no beam. Substitution errors are largely *unstable under benign perturbation* (a different
 silence prefix, different weights precision) while correct words are stable — so a
 word-level vote across perturbed passes recovers a slice of the substitutions that no
-single deterministic pass can. Classic ROVER (Fiscus 1997), applied to deployment-mode
-streaming output.
+single deterministic pass can. ROVER-style voting (in the spirit of Fiscus 1997, but a
+simplification of it: iterative pairwise alignment against a single consensus
+representative per slot, frequency-only voting, no confidence scores, no word transition
+network), applied to deployment-mode streaming output. The members are perturbations of
+one greedy decoder (quantization / tail / prefix), not independent systems — call this a
+perturbation ensemble, not a multi-system ROVER, when writing it up.
 
 Alignment: iterative pairwise Levenshtein against the current consensus (first file seeds
-it), then per-slot majority with ties going to the seed system (our best single config).
+it), then per-slot majority. Ties: the seed system's word wins if it is among the
+top-voted; otherwise the first tied word in slot order (deterministic — never Python set
+iteration order, which is randomized by string hashing).
 
 usage: rover.py out.tsv in1.tsv in2.tsv [in3.tsv ...]
 """
-import re
+import os
 import sys
 
-def norm_words(s):
-    s = s.lower().replace("’", "'")
-    s = re.sub(r"([a-zà-ÿ])'", r"\1' ", s)
-    return "".join(c if (c.isalnum() or c in "' ") else " " for c in s).split()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from score_wer import normalize as norm_words   # ONE normalizer for the whole harness
 
 def load(p):
     d = {}
@@ -54,7 +58,7 @@ def rover(hyps):
     """hyps: list of word lists; hyps[0] seeds the consensus and wins ties."""
     # consensus = list of slots; each slot = list of votes (word or "" for gap)
     slots = [[w] for w in hyps[0]]
-    for h in hyps[1:]:
+    for r, h in enumerate(hyps[1:], start=1):
         cons = [s[0] if s[0] else (next((w for w in s if w), "")) for s in slots]
         pairs = align(cons, h)
         new_slots = []
@@ -64,16 +68,22 @@ def rover(hyps):
             elif ci is not None:
                 slots[ci].append(""); new_slots.append(slots[ci])
             else:
-                s = [""] * (len(new_slots[-1]) - 1 if new_slots else 1)
-                new_slots.append(s + [h[hj]])
+                # slot absent from the consensus so far: all r systems already
+                # processed implicitly voted "gap" here (a head-insertion used to
+                # get a single phantom gap vote regardless of round, letting a
+                # 2-of-5 word win the slot)
+                new_slots.append([""] * r + [h[hj]])
         slots = new_slots
     out = []
     for s in slots:
-        best, cnt = s[0], 0
-        for w in set(s):
-            c = s.count(w)
-            if c > cnt or (c == cnt and w == s[0]):
-                best, cnt = w, c
+        counts = {}
+        for w in s:
+            counts[w] = counts.get(w, 0) + 1
+        top = max(counts.values())
+        if counts.get(s[0], 0) == top:
+            best = s[0]                     # seed wins any tie it is part of
+        else:
+            best = next(w for w in s if counts[w] == top)   # slot order, deterministic
         if best:
             out.append(best)
     return out

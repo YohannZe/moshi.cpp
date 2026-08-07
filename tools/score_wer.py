@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """WER scoring for stt_eval output against FLEURS references.
 
-usage: score_wer.py <fleurs test.tsv> <hyp.tsv> [--dump-worst N]
+usage: score_wer.py <fleurs test.tsv> <hyp.tsv> [--dump-worst N] [--ci [B]]
+                    [--compare other_hyp.tsv]
 
 hyp.tsv is stt_eval's stdout: HYP\t<basename.wav>\t<text>
+
+--ci [B]              utterance-level percentile bootstrap (default B=2000, fixed seed
+                      1234) around the pooled WER. Utterances are the resampling unit,
+                      so word-level clustering is respected.
+--compare other.tsv   paired bootstrap of (this hyp − other hyp) on the intersection of
+                      scored utterances: 95 % CI of the WER difference and a two-sided
+                      bootstrap p-value. This is the test to cite when claiming one
+                      config beats another.
 
 Normalization (applied identically to both sides, and stated because it decides the
 number): lowercase; French elisions split (l'accident -> l' accident, matching FLEURS'
@@ -15,9 +24,9 @@ FLEURS tsv columns: id, filename, raw_transcription, transcription (already
 lowercased/unpunctuated), words, chars, gender. We score against column 3 but
 re-normalize it anyway so both sides pass through exactly the same function.
 """
+import random
 import re
 import sys
-import unicodedata
 
 def normalize(s: str) -> list[str]:
     s = s.lower()
@@ -55,21 +64,10 @@ def wer(ref: list[str], hyp: list[str]):
             D += 1; i -= 1
     return (S, I, D, n)
 
-def main():
-    tsv_path, hyp_path = sys.argv[1], sys.argv[2]
-    dump_worst = 0
-    if "--dump-worst" in sys.argv:
-        dump_worst = int(sys.argv[sys.argv.index("--dump-worst") + 1])
-
-    refs = {}
-    for line in open(tsv_path, encoding="utf-8"):
-        cols = line.rstrip("\n").split("\t")
-        if len(cols) >= 4:
-            refs[cols[1]] = cols[3]     # filename -> normalized transcription
-
-    total_S = total_I = total_D = total_N = 0
-    scored, missing = 0, 0
-    per_file = []
+def score_file(refs, hyp_path):
+    """Score one hyp file. Returns (per_utt, missing) where per_utt maps
+    fname -> (S, I, D, N, ref_text, hyp_text)."""
+    per_utt, missing = {}, 0
     for line in open(hyp_path, encoding="utf-8"):
         if not line.startswith("HYP\t"):
             continue
@@ -79,10 +77,79 @@ def main():
             continue
         r, h = normalize(refs[fname]), normalize(text)
         S, I, D, N = wer(r, h)
-        total_S += S; total_I += I; total_D += D; total_N += N
-        scored += 1
-        if N:
-            per_file.append(((S + I + D) / N, fname, refs[fname], text))
+        per_utt[fname] = (S, I, D, N, refs[fname], text)
+    return per_utt, missing
+
+def pooled_wer(per_utt, keys=None):
+    keys = per_utt if keys is None else keys
+    E = N = 0
+    for k in keys:
+        S, I, D, n = per_utt[k][:4]
+        E += S + I + D; N += n
+    return E / N if N else 0.0
+
+BOOT_SEED, BOOT_B = 1234, 2000
+
+def bootstrap_ci(per_utt, B=BOOT_B):
+    """Percentile bootstrap of the pooled WER, resampling utterances."""
+    keys = sorted(per_utt)
+    rng = random.Random(BOOT_SEED)
+    stats = []
+    for _ in range(B):
+        sample = [keys[rng.randrange(len(keys))] for _ in keys]
+        stats.append(pooled_wer(per_utt, sample))
+    stats.sort()
+    return stats[int(0.025 * B)], stats[int(0.975 * B)]
+
+def paired_bootstrap(pa, pb, B=BOOT_B):
+    """Paired bootstrap of pooled WER(a) - WER(b) over the common utterances.
+    Returns (delta, lo, hi, p_two_sided)."""
+    keys = sorted(set(pa) & set(pb))
+    rng = random.Random(BOOT_SEED)
+    delta = pooled_wer(pa, keys) - pooled_wer(pb, keys)
+    deltas = []
+    for _ in range(B):
+        sample = [keys[rng.randrange(len(keys))] for _ in keys]
+        deltas.append(pooled_wer(pa, sample) - pooled_wer(pb, sample))
+    deltas.sort()
+    lo, hi = deltas[int(0.025 * B)], deltas[int(0.975 * B)]
+    # two-sided: how often does the resampled difference cross zero
+    if delta > 0:
+        opposite = sum(1 for d in deltas if d <= 0)
+    elif delta < 0:
+        opposite = sum(1 for d in deltas if d >= 0)
+    else:
+        opposite = B // 2
+    p = min(1.0, 2 * opposite / B)
+    return delta, lo, hi, len(keys), p
+
+def main():
+    tsv_path, hyp_path = sys.argv[1], sys.argv[2]
+    dump_worst = 0
+    if "--dump-worst" in sys.argv:
+        dump_worst = int(sys.argv[sys.argv.index("--dump-worst") + 1])
+    want_ci = "--ci" in sys.argv
+    B = BOOT_B
+    if want_ci:
+        nxt = sys.argv.index("--ci") + 1
+        if nxt < len(sys.argv) and sys.argv[nxt].isdigit():
+            B = int(sys.argv[nxt])
+    compare_path = None
+    if "--compare" in sys.argv:
+        compare_path = sys.argv[sys.argv.index("--compare") + 1]
+
+    refs = {}
+    for line in open(tsv_path, encoding="utf-8"):
+        cols = line.rstrip("\n").split("\t")
+        if len(cols) >= 4:
+            refs[cols[1]] = cols[3]     # filename -> normalized transcription
+
+    per_utt, missing = score_file(refs, hyp_path)
+    total_S = sum(v[0] for v in per_utt.values())
+    total_I = sum(v[1] for v in per_utt.values())
+    total_D = sum(v[2] for v in per_utt.values())
+    total_N = sum(v[3] for v in per_utt.values())
+    scored = len(per_utt)
 
     if not total_N:
         print("nothing scored"); return
@@ -92,7 +159,22 @@ def main():
     print(f"S/I/D        : {total_S}/{total_I}/{total_D}")
     print(f"WER          : {100*w:.2f} %")
 
+    if want_ci:
+        lo, hi = bootstrap_ci(per_utt, B)
+        print(f"95% CI       : [{100*lo:.2f}, {100*hi:.2f}] %"
+              f"  (utterance bootstrap, B={B}, seed={BOOT_SEED})")
+
+    if compare_path:
+        pb, _ = score_file(refs, compare_path)
+        delta, lo, hi, n_common, p = paired_bootstrap(per_utt, pb, B)
+        print(f"vs {compare_path}  (n={n_common} common utterances)")
+        print(f"  other WER  : {100*pooled_wer(pb, sorted(set(per_utt) & set(pb))):.2f} %")
+        print(f"  delta      : {100*delta:+.2f} pt  95% CI [{100*lo:+.2f}, {100*hi:+.2f}]"
+              f"  p={p:.4f}  (paired bootstrap, B={B}, seed={BOOT_SEED})")
+
     if dump_worst:
+        per_file = [((S + I + D) / N, f, ref, hyp)
+                    for f, (S, I, D, N, ref, hyp) in per_utt.items() if N]
         per_file.sort(reverse=True)
         print(f"\n-- {dump_worst} worst --")
         for werr, fname, ref, hyp in per_file[:dump_worst]:

@@ -27,6 +27,13 @@
 //                      neural-codec STT is input-gain sensitive (FLEURS at -46 dBFS: 17.6%
 //                      WER raw vs 11.4% normalized) and a real capture pipeline cannot
 //                      normalize offline. Same algorithm as the app's JNI layer.
+//   STT_RESAMPLE=linear  fall back to 2-point linear interpolation for rate conversion.
+//                      Default is windowed-sinc (Hann, 24 zero-crossings, rolloff 0.945 —
+//                      julius' defaults, which measured -0.84 WER pt vs linear on the
+//                      FLEURS 113 subset). Linear interpolation's sinc^2 response leaves
+//                      spectral IMAGES of the input band above the source Nyquist
+//                      (imaging, not aliasing: 16->24 kHz is upsampling), energy Mimi
+//                      never saw in training.
 
 #include <cmath>
 #include <cstdio>
@@ -87,6 +94,44 @@ static void resample_linear(const std::vector<float>& in, int in_rate,
         const double frac = pos - (double)i0;
         out[i] = (float)((1.0 - frac) * in[i0] + frac * in[i1]);
     }
+}
+
+// Windowed-sinc resampling (Hann window, ZEROS zero-crossings per side, rolloff on the
+// lower Nyquist). Offline form — the whole file is available; the app's streaming path
+// needs the same kernel in polyphase form. Matches julius.resample_frac's design
+// parameters, which produced the sinc arm of the 2026-08 sweep.
+static void resample_sinc(const std::vector<float>& in, int in_rate,
+                          std::vector<float>& out, int out_rate) {
+    if (in_rate == out_rate) { out = in; return; }
+    const int    ZEROS   = 24;
+    const double ROLLOFF = 0.945;
+    const double ratio = (double)in_rate / (double)out_rate;   // input samples per output
+    // cutoff in cycles per INPUT sample: half the lower of the two Nyquists, scaled back
+    const double c = 0.5 * ROLLOFF * std::min(1.0, (double)out_rate / (double)in_rate);
+    const double W = ZEROS / (2.0 * c);                        // kernel half-width, input samples
+    const size_t n_out = (size_t)((double)in.size() / ratio);
+    out.assign(n_out, 0.0f);
+    for (size_t i = 0; i < n_out; i++) {
+        const double t = i * ratio;
+        const long k0 = std::max(0L, (long)std::ceil(t - W));
+        const long k1 = std::min((long)in.size() - 1, (long)std::floor(t + W));
+        double acc = 0.0;
+        for (long k = k0; k <= k1; k++) {
+            const double u = t - (double)k;
+            const double x = 2.0 * c * u;
+            const double s = (x == 0.0) ? 1.0 : std::sin(M_PI * x) / (M_PI * x);
+            const double w = 0.5 * (1.0 + std::cos(M_PI * u / W));   // Hann over |u|<=W
+            acc += in[(size_t)k] * 2.0 * c * s * w;
+        }
+        out[i] = (float)acc;
+    }
+}
+
+static void resample(const std::vector<float>& in, int in_rate,
+                     std::vector<float>& out, int out_rate) {
+    const char* mode = getenv("STT_RESAMPLE");
+    if (mode && strcmp(mode, "linear") == 0) resample_linear(in, in_rate, out, out_rate);
+    else                                     resample_sinc(in, in_rate, out, out_rate);
 }
 
 static std::string detok(const std::string& piece) {
@@ -179,19 +224,23 @@ int main(int argc, char** argv) {
             fprintf(stderr, "SKIP %s (load failed)\n", files[fi].c_str());
             continue;
         }
-        resample_linear(audio_in, in_rate, audio, codec_rate);
+        resample(audio_in, in_rate, audio, codec_rate);
         total_audio_s += (double)audio_in.size() / in_rate;
 
         mimi_encode_reset(enc);   // fresh conv state per utterance; LM context persists
         moshi_margin_reset();
 
-        // Causal AGC. A one-pole peak envelope with fast attack (a loud sample raises the
-        // envelope immediately) and slow release (~4 s to halve), gain aimed at -3 dBFS
-        // peak, capped at 40x so digital silence is not amplified into hiss. Causal by
-        // construction: the gain applied to a sample depends only on past samples, so the
-        // identical code can run in the live capture path.
+        // Causal AGC — strictly speaking a causal peak normalizer / limiter: one-pole peak
+        // envelope with instantaneous attack (a loud sample raises the envelope
+        // immediately) and slow exponential release (tau = 4 s, i.e. ~2.77 s to halve),
+        // gain aimed at -3 dBFS peak, capped at 40x so digital silence is not amplified
+        // into hiss. Causal by construction: the gain applied to a sample depends only on
+        // past samples, so the identical code can run in the live capture path. Note the
+        // envelope persists across files (like a live stream), which makes AGC-arm WER
+        // depend on file-list order; STT_AGC_RESET=1 resets it per utterance.
         if (agc_on) {
             static float env = 0.f;                  // persists across files, like a live stream
+            if (getenv("STT_AGC_RESET")) env = 0.f;
             const float target = 0.7f, gmax = 40.f;
             const float release = expf(-1.f / (4.f * codec_rate));  // per-sample decay
             for (size_t i = 0; i < audio.size(); i++) {

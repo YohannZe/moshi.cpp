@@ -28,3 +28,4 @@ build-android/
 build-android-cl/
 models/
 eval-data/
+__pycache__/

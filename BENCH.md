@@ -1052,10 +1052,15 @@ as we can tell these are the first public FLEURS-fr figures for this model.
 **Quantization costs 0.11 WER points for 1.97x speed and 2.6x smaller weights** — the
 in-house "Q4_K scores 0.00 % vs F16" finding, now confirmed at benchmark scale.
 
-For rough context (literature values, TO VERIFY before citing): whisper-small ≈ 13–15 % on
-FLEURS-fr, medium ≈ 9–10 %, large-v3 ≈ 5–6 % — none of them streaming. This model sits
-between small and medium in quality while emitting text 0.5 s behind the audio on a phone
-CPU.
+For rough context — VERIFIED 2026-08-07 against the Whisper paper's Table 13 (FLEURS,
+zero-shot), as relayed by bofenghuang's whisper-large-v2-french model card: whisper-small
+15.0 %, medium 8.7 %, large 7.7 %, large-v2 8.3 % on FLEURS-fr — none of them streaming.
+(The ~5 % figures floating around are French *fine-tuned* large-v2 variants, not
+zero-shot; an earlier draft of this note wrongly attributed 5–6 % to large-v3.) Caveat
+for the paper: Whisper's numbers use Whisper's own text normalizer, ours use
+score_wer.py's — cross-scorer WERs are indicative, not directly comparable. This model
+sits between small and medium in quality while emitting text 0.5 s behind the audio on a
+phone CPU.
 
 ## Finding 1: a neural-codec STT is input-gain sensitive
 
@@ -1276,8 +1281,10 @@ Target set by the user: below 10 %. Reached, model untouched. The ladder (113-fi
 | step | WER | what it is |
 |---|---|---|
 | linear-resample baseline | 11.45 % | where the week started |
-| **windowed-sinc resampling** (julius) | **10.61 %** | −0.84 alone: linear 16→24 kHz folds
-aliasing into the band. The single biggest quality lever found since AGC. |
+| **windowed-sinc resampling** (julius) | **10.61 %** | −0.84 alone: linear 16→24 kHz
+upsampling leaves spectral images of the 0–8 kHz band above 8 kHz (imaging — not
+aliasing, corrected 2026-08-07: upsampling folds nothing). The single biggest quality
+lever found since AGC. |
 | + tail16 + prefix8 | **10.31 %** | interactions are real: tail16 *hurts* on the sinc base
 alone (11.11) and prefix rescues it; on the linear base tail16 helped alone. Serving
 parameters must be tuned jointly, on the final audio path. |
@@ -1302,8 +1309,10 @@ larger to have a chance; kept behind MOSHI_TEXT_BIAS (off by default), hook cost
 unset.
 
 ## Also shipped to the app this session
-- Speculation (spec=2) in the JNI: −8 % device compute, +80 ms text latency, odd-frame flush
-  and reset edge cases closed.
+- Speculation (spec=2) in the JNI: −8 % compute **measured on host only** (the device
+  gain is extrapolated — the sole device speculation A/B, pre-flash, was inside ±15 %
+  noise; corrected 2026-08-07, was written "device compute"), +80 ms text latency,
+  odd-frame flush and reset edge cases closed.
 - Watchdog v2: 12 *consecutive* speech-chunks with no text (instantaneous-VAD version caught
   two radio jingles in 40 min).
 
@@ -1321,10 +1330,137 @@ other 4 ensemble members. Cost-quality curve (subset, primary = t16p8):
 | 100 % | 5.00x | 9.63 % |
 
 Re-decoding only the 10 % least-confident utterances crosses sub-10 at 1.4x — more than half
-the full-ensemble gain for 8 % of its extra cost. The margin signal predicts where votes
+the full-ensemble gain for 10 % of its extra cost (0.4x of 4.0x; was misstated as 8 %). The margin signal predicts where votes
 differ, which is the draft/verify economics of speculative decoding transposed to decoding
 confidence. At 1.4x, device RTF ≈ 0.45: phone-viable as a post-utterance refinement.
 
 Instrumentation: MOSHI_MARGIN=1 (text_bias.h), CONF lines in stt_eval, curve in
 tools/gated_ensemble.py — the curve itself needs no new engine compute once the ensemble
 members exist.
+
+---
+
+# Review pass — errata, statistics, and fixes (2026-08-07, night)
+
+A hostile-reviewer audit of everything above, done while the full-676 confirmation runs.
+Everything here is either a correction to a prior claim or new rigor added to the
+harness. The corrections are also applied inline at the original claims.
+
+## Statistics added (score_wer.py --ci / --compare, utterance-level bootstrap, B=2000)
+
+The harness had no error bars anywhere. Now measured, on the committed artifacts:
+
+| comparison | delta | 95 % CI | p | verdict |
+|---|---|---|---|---|
+| port F16 vs reference (676) | −1.33 pt | [−2.20, −0.41] | **0.005** | the one headline that clears significance |
+| Q4_K vs F16 (676, resumed-chain artifact) | +0.32 pt | [−0.08, +0.70] | 0.10 | n.s. — quote "quantization is free within noise", not "costs 0.11 pt" |
+| combo (tail16+prefix6+AGC) vs base (676) | −0.32 pt | [−1.00, +0.26] | 0.32 | n.s. alone; the deletions −23 % mechanism is the evidence, not the point estimate |
+| 5-way ROVER vs primary (113 subset) | −0.60 pt | [−1.26, +0.03] | 0.06 | borderline — sub-10 is NOT established on 2 979 words; the 676 run is the decider |
+
+Single-number CIs: subset figures carry ±~2 pt (9.70 % → [7.85, 11.68]) — every step of
+the sub-10 ladder is inside one CI, which is why the full-676 confirmation matters.
+
+## The port-vs-reference headline is protocol-confounded — grid now possible
+
+12.62 vs 11.29 confounds four variables at once: engine, precision (F32/F16), tail flush
+(7 vs 14 frames), warm vs cold LM context. The −1.33 pt is significant but is a *system*
+claim, not an *engine* claim, until the grid is run. `ref_eval.py` now takes
+REF_TAIL_EXTRA / REF_PREFIX_FRAMES (REF_TAIL_EXTRA=7 matches our default flush) — the
+2×2 decomposition (ref×{tail7,tail14}, port×{fresh,persistent}) is one overnight run and
+turns the weakness into the ablation section.
+
+## rover.py had two real bugs — fixed, subset re-voted
+
+1. Tie-breaking iterated a Python set → randomized-hash order → **non-deterministic
+   output** across runs. Now: seed wins ties it is part of, else first tied word in slot
+   order.
+2. Head-of-utterance insertions got one phantom gap vote regardless of round, so a
+   2-of-5 word could win a slot that correct bookkeeping (3 gap votes) would drop.
+
+Re-vote with fixed code: 9.67 % → **9.70 %** (one substitution — the number survives,
+and is now reproducible bit-for-bit). `rover_C_fixed.tsv` committed alongside the
+historical file. The f676 vote at the end of the running confirmation uses the fixed
+code. Also: the docstring no longer calls this "classic ROVER (Fiscus 1997)" — it is
+iterative pairwise alignment + frequency vote, no confidence, no WTN.
+
+## The "5 systems" are one decoder under perturbation — now quantified
+
+tools/ensemble_diversity.py (new): pairwise error-count correlation between members is
+**0.81–0.92**, hypothesis disagreement only 2.8–6.3 % of words, oracle
+(best-member-per-utterance) 8.09 %. Call it a perturbation ensemble; "decorrelated by
+tail/prefix/precision" overstated it. The vote works *because* the small disagreements
+concentrate on error sites, and now there is a table to show it.
+
+## Gated ensemble: scorers unified, ranking confound measured, claims corrected
+
+- gated_ensemble.py now imports score_wer's normalize/wer (the 9.63-vs-9.67
+  same-config disagreement was two hand-rolled scorers; gone — 100 % gating now equals
+  the ROVER row exactly: 9.70).
+- With fixed rover, the curve reads: 0 % → 10.31, 10 % → **9.97** at 1.40x, 100 % → 9.70.
+- "half the gain for 8 % of the cost" corrected to 10 % (0.4x/4.0x), inline.
+- n_low is length-confounded; `--rank frac` (n_low/n_words) measures it: **worse** at
+  10 % (10.14 vs 9.97) — raw n_low wins partly *because* it proxies length. State this.
+- Empty-primary utterances have n_low = 0 and were unreachable by the gate — the worst
+  failure mode was invisible to it. Both rankings now escalate them first (0 such
+  utterances on this subset, so numbers unchanged — but the 676 set has them).
+- The 10 % operating point was read off the test curve; it needs selection on dev
+  (fleurs_prepare.py now downloads the dev split) before it is a claim.
+- Costs remain analytic (equal-cost passes) — the printout now says so; F16 members
+  cost ~1.8x a Q4_K pass, and "device RTF ≈ 0.45" was derived, never measured.
+
+## AGC: what it is, and a real app bug found by this audit
+
+- It is a causal peak normalizer/limiter (instant attack, τ = 4 s exponential release —
+  which halves in 2.77 s, not the "~4 s" the comments said; comments fixed).
+- The eval envelope persists across files, so AGC-arm WER depends on file-list order;
+  STT_AGC_RESET=1 added for the order-independent variant.
+- The five sub-10 ensemble arms ran **AGC off** while the app ships AGC always-on —
+  ensemble numbers and deployment differ in input conditioning; re-run the members with
+  STT_AGC=1 before quoting them as deployed quality.
+- **App bug (fixed in kata):** the JNI applied AGC unconditionally AND the Kotlin
+  AutoGain ran in front of it when the settings toggle was on → the stream was gained
+  twice in series (never measured); toggle off still left the JNI stage on, so the
+  setting did nothing for kyutai. Now: Kotlin stage off for kyutai, toggle forwarded to
+  the JNI (nativeSetAgc).
+
+## Sinc resampling now exists in code, not only in an offline heredoc
+
+The −0.84 pt lever was julius defaults in a gitignored script; stt_eval and the shipped
+JNI still carried linear interpolation (the app was safe only because capture follows
+the engine at 24 kHz — the 16 kHz fallback path had exactly the measured defect).
+Windowed-sinc (Hann, 24 zeros, rolloff 0.945) is now the default resampler in
+stt_eval.cpp (STT_RESAMPLE=linear to fall back) and a streaming polyphase-style version
+replaced the linear kernel in moshi_jni.cpp. **Not yet device-validated — the JNI change
+must not ship until an A/B on the phone** (build.sh stages it; the pending arms of the
+current 676 run still use the pre-change binary, which is correct: its inputs are
+pre-resampled 24 kHz files, where the resampler is a no-op).
+
+## Standing discrepancies, recorded so nobody quotes them
+
+- Padding rate appears as 55.5 % (measured, STT_DUMP_TOKENS) and "roughly 65 %"
+  (later section) for the same fixture family. Unreconciled; re-measure before citing.
+- "Q4_K ≥ Q4_0": claimed at 3 % (P1), retracted as inside the ±7 % noise floor (GPU
+  correction section), then re-asserted at 17 % under tinyBLAS with "same order as
+  generic kernels" — the last sentence contradicts the retraction. The tinyBLAS margin
+  is real; the pre-tinyBLAS ordering claim stays retracted.
+- The whisper FLEURS-fr context numbers are now verified (Whisper paper Table 13,
+  zero-shot: small 15.0 / medium 8.7 / large 7.7 / large-v2 8.3) and the wrong
+  "large-v3 ≈ 5–6 %" guess corrected inline — those ~5 % figures are French fine-tunes.
+  Different text normalizers across scorers: indicative comparison only.
+- hyp for the 11.40 % unbroken Q4_K chain was not preserved; the committed artifact is
+  the resumed chain at 11.61 %. Quote 11.40 only with the ±0.2 segmentation-variance
+  caveat, or re-run.
+- Pre-flash closed verdicts never re-tested on the post-flash engine: OpenMP, +fp16
+  kernels, thread count, repack, GPU offload, codec-quant speed — and **context=375
+  ships on a stale −24 % whose mechanism (manual-attention traffic) the flash fix
+  removed, while its quality cost (10.32→10.91 % host) is still paid.** Re-measure
+  context 750 vs 375 post-flash+llamafile before the paper freezes the config.
+
+## Evidence chain committed
+
+- `eval-artifacts/`: reference + headline hypothesis files, subset members, CONF file,
+  device run, FLEURS manifest — every number in the paper tables is now reproducible
+  from the repo with score_wer.py (README in the directory maps file → claim).
+- `tools/eval-scripts/`: the sweep drivers that lived only in gitignored eval-data.
+- fleurs_prepare.py downloads the dev split for future tuning; tuning on (a subset of)
+  test is recorded above as the audit's single most attackable finding.

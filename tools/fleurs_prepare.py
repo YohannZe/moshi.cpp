@@ -12,8 +12,12 @@ Two things this does beyond downloading:
   (measured: 17.62 % WER raw vs 11.40 % normalized, 29 vs 3 empty transcripts). Each file
   is peak-normalized to -3 dBFS. This is stated in the eval protocol.
 
-usage: fleurs_prepare.py <out_dir>
-creates <out_dir>/{test.tsv, test_pcm/*.wav, full.lst}
+usage: fleurs_prepare.py <out_dir> [split]
+split defaults to "test". Use "dev" to prepare a tuning set that is disjoint from the
+reported test set — serving knobs, ensemble membership and gate thresholds must be
+selected on dev, never on test (the 2026-08 sub-10 sweep tuned on a subset of test,
+which is the single most attackable choice in the eval; do not repeat it).
+creates <out_dir>/{<split>.tsv, <split>_pcm/*.wav, full.lst (test) / <split>.lst}
 """
 import array
 import glob
@@ -27,23 +31,25 @@ BASE = "https://huggingface.co/datasets/google/fleurs/resolve/main/data/fr_fr"
 
 def main():
     out = sys.argv[1]
+    split = sys.argv[2] if len(sys.argv) > 2 else "test"
     os.makedirs(out, exist_ok=True)
 
-    tsv = f"{out}/test.tsv"
+    tsv = f"{out}/{split}.tsv"
     if not os.path.exists(tsv):
-        subprocess.run(["curl", "-sL", "-o", tsv, f"{BASE}/test.tsv"], check=True)
-    tar = f"{out}/test.tar.gz"
-    if not os.path.isdir(f"{out}/test"):
+        subprocess.run(["curl", "-sL", "-o", tsv, f"{BASE}/{split}.tsv"], check=True)
+    tar = f"{out}/{split}.tar.gz"
+    if not os.path.isdir(f"{out}/{split}"):
         if not os.path.exists(tar):
             print("downloading audio (~350 MB)...", file=sys.stderr)
-            subprocess.run(["curl", "-sL", "-o", tar, f"{BASE}/audio/test.tar.gz"], check=True)
+            subprocess.run(["curl", "-sL", "-o", tar, f"{BASE}/audio/{split}.tar.gz"],
+                           check=True)
         with tarfile.open(tar) as t:
             t.extractall(out)
 
-    os.makedirs(f"{out}/test_pcm", exist_ok=True)
+    os.makedirs(f"{out}/{split}_pcm", exist_ok=True)
     n = 0
-    for p in sorted(glob.glob(f"{out}/test/*.wav")):
-        dst = f"{out}/test_pcm/" + os.path.basename(p)
+    for p in sorted(glob.glob(f"{out}/{split}/*.wav")):
+        dst = f"{out}/{split}_pcm/" + os.path.basename(p)
         if os.path.exists(dst):
             n += 1
             continue
@@ -70,7 +76,7 @@ def main():
             f = array.array("f", ((f[j] + f[j+1]) / 2 for j in range(0, len(f)-1, 2)))
         peak = max(abs(x) for x in f) or 1.0
         g = 0.7 / peak
-        pcm = array.array("h", (max(-32768, min(32767, int(x*g*32767))) for x in f))
+        pcm = array.array("h", (max(-32768, min(32767, round(x*g*32767))) for x in f))
         d = pcm.tobytes()
         hdr = (b"RIFF" + struct.pack("<I", 36+len(d)) + b"WAVEfmt " +
                struct.pack("<IHHIIHH", 16, 1, 1, sr, sr*2, 2, 16) +
@@ -78,10 +84,11 @@ def main():
         open(dst, "wb").write(hdr + d)
         n += 1
 
-    with open(f"{out}/full.lst", "w") as fl:
-        for p in sorted(glob.glob(f"{out}/test_pcm/*.wav")):
+    lst = f"{out}/full.lst" if split == "test" else f"{out}/{split}.lst"
+    with open(lst, "w") as fl:
+        for p in sorted(glob.glob(f"{out}/{split}_pcm/*.wav")):
             fl.write(os.path.abspath(p) + "\n")
-    print(f"{n} files ready in {out}/test_pcm, list in {out}/full.lst")
+    print(f"{n} files ready in {out}/{split}_pcm, list in {lst}")
 
 if __name__ == "__main__":
     main()
