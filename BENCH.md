@@ -1628,3 +1628,35 @@ Also free and legitimate: the 67 digit-formatting substitutions (0.37 pt) are a 
 convention, not recognition errors. Whisper's own evaluation applies a number normalizer to
 both sides; ours does not. Adding one to `score_wer.py` is standard practice and must be
 applied symmetrically.
+
+## Correction: most confusions are NOT homophones — the signal contains the answer (2026-08-08)
+
+The previous section lumped `des`→`les` with `leur`→`leurs` and called all of it
+"agreement/homophones". That is wrong and the distinction changes what to build. `des` /de/
+and `les` /le/ differ in their initial consonant — a stop with a release burst against a
+lateral approximant — and are among the most acoustically separable pairs in French. Splitting
+the 1368 substitutions properly:
+
+| class | count | share | decidable from audio? |
+|---|---|---|---|
+| **true homophones** (silent final s/x, accent only) | 275 | 20.1 % | **no** — needs grammar |
+| — of which accent-only (`a`/`à`, `la`/`là`) | 13 | 1.0 % | no |
+| **acoustically distinct** | **1093** | **79.9 %** | **yes — the information is in the waveform** |
+
+The top acoustically-distinct confusions are `des`→`les` (16), `est`→`et` (12), `d'`→`des`
+(10), `les`→`des` (9), `un`→`en` (4), `pinson`→`pinceau` (4). None of these is a homophone.
+Four-fifths of our substitutions are cases where the answer is present in the signal and the
+system fails to use it.
+
+That reframes the whole remaining gap. It is not a grammar problem to be patched downstream —
+it is **information lost between the waveform and the text decision**, and the candidates are:
+the RVQ codec discarding fine spectral detail (32 stages of hard argmax over 2048 centroids,
+and we already know that cascade is quantization-fragile), the 12.5 Hz frame rate smearing
+short consonant releases, or the LM prior overriding weak acoustic evidence. Each is testable:
+the margin instrumentation already says whether the model was confidently wrong (prior
+dominating) or hesitant (acoustics weak), and that measurement comes before any engineering.
+
+Accent normalization, the other open question: stripping accents from both sides moves WER
+**10.66 → 10.59 %** — 0.07 pt. Real but negligible, and it does not change any conclusion.
+Keep accents (FLEURS' own reference column keeps them, and `à` vs `a` are different French
+words); note the number and move on.
