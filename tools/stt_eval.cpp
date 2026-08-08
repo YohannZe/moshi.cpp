@@ -96,6 +96,7 @@ static void resample_linear(const std::vector<float>& in, int in_rate,
     }
 }
 
+
 // Windowed-sinc resampling (Hann window, ZEROS zero-crossings per side, rolloff on the
 // lower Nyquist). Offline form — the whole file is available; the app's streaming path
 // needs the same kernel in polyphase form. Matches julius.resample_frac's design
@@ -103,8 +104,10 @@ static void resample_linear(const std::vector<float>& in, int in_rate,
 static void resample_sinc(const std::vector<float>& in, int in_rate,
                           std::vector<float>& out, int out_rate) {
     if (in_rate == out_rate) { out = in; return; }
-    const int    ZEROS   = 24;
-    const double ROLLOFF = 0.945;
+    // Sweepable: 16->24 kHz upsampling leaves spectral images above the source Nyquist that
+    // Mimi never saw in training, and where/how hard we cut them is a free quality knob.
+    const int    ZEROS   = getenv("STT_RS_ZEROS")   ? atoi(getenv("STT_RS_ZEROS")) : 24;
+    const double ROLLOFF = getenv("STT_RS_ROLLOFF") ? atof(getenv("STT_RS_ROLLOFF")) : 0.945;
     const double ratio = (double)in_rate / (double)out_rate;   // input samples per output
     // cutoff in cycles per INPUT sample: half the lower of the two Nyquists, scaled back
     const double c = 0.5 * ROLLOFF * std::min(1.0, (double)out_rate / (double)in_rate);
@@ -207,6 +210,13 @@ int main(int argc, char** argv) {
     const int   tail_frames = (int)(cfg.stt_config.audio_delay_seconds * frame_rate) + tail_extra;
     const int   prefix_frames = getenv("STT_PREFIX") ? atoi(getenv("STT_PREFIX")) : 0;
     const bool  agc_on = getenv("STT_AGC") && getenv("STT_AGC")[0] == '1';
+    const float hpf_hz  = getenv("STT_HPF")     ? (float)atof(getenv("STT_HPF")) : 0.f;
+    const float preemph = getenv("STT_PREEMPH") ? (float)atof(getenv("STT_PREEMPH")) : 0.f;
+    fprintf(stderr, "front-end: resample=%s zeros=%s rolloff=%s hpf=%.0fHz preemph=%.2f\n",
+            getenv("STT_RESAMPLE") ? getenv("STT_RESAMPLE") : "sinc",
+            getenv("STT_RS_ZEROS") ? getenv("STT_RS_ZEROS") : "24",
+            getenv("STT_RS_ROLLOFF") ? getenv("STT_RS_ROLLOFF") : "0.945",
+            hpf_hz, preemph);
     fprintf(stderr, "serving: tail=%d (delay+%d) prefix=%d agc=%d\n",
             tail_frames, tail_extra, prefix_frames, agc_on);
 
@@ -225,6 +235,24 @@ int main(int argc, char** argv) {
             continue;
         }
         resample(audio_in, in_rate, audio, codec_rate);
+
+        // Front-end shaping, after resampling so coefficients mean the same thing whatever
+        // the source rate.
+        if (hpf_hz > 0.f) {   // one-pole high-pass: DC/rumble costs the codec real codes
+            const float a = expf(-2.f * (float)M_PI * hpf_hz / (float)codec_rate);
+            float px = 0.f, py = 0.f;
+            for (size_t i = 0; i < audio.size(); i++) {
+                const float x = audio[i];
+                py = a * (py + x - px); px = x; audio[i] = py;
+            }
+        }
+        if (preemph != 0.f) { // y[n]=x[n]-k*x[n-1]: tilts energy toward the band top, which
+            float prev = 0.f; // is exactly where a 16 kHz source is empty vs 24 kHz training
+            for (size_t i = 0; i < audio.size(); i++) {
+                const float x = audio[i];
+                audio[i] = x - preemph * prev; prev = x;
+            }
+        }
         total_audio_s += (double)audio_in.size() / in_rate;
 
         mimi_encode_reset(enc);   // fresh conv state per utterance; LM context persists
