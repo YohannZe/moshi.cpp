@@ -1464,3 +1464,37 @@ pre-resampled 24 kHz files, where the resampler is a no-op).
 - `tools/eval-scripts/`: the sweep drivers that lived only in gitignored eval-data.
 - fleurs_prepare.py downloads the dev split for future tuning; tuning on (a subset of)
   test is recorded above as the audit's single most attackable finding.
+
+## Full-676 verdict: the sub-10 did NOT hold — subset overfitting, quantified (2026-08-08)
+
+The 9.67 % / 9.94 % sub-10 numbers were measured on the 113-file subset that had also been
+used to *select* the serving knobs and ensemble membership. At full scale:
+
+| config | subset | **full 676** |
+|---|---|---|
+| best single (t16p8, Q4_K) | 10.31 % | 11.57 % |
+| best single at full scale (t16p6, **F16**) | — | **10.66 %** |
+| ROVER 5 | 9.67 % | **10.47 %** |
+
+**Selection bias cost ~0.8–1.3 points.** The subset even picked the wrong winner: t16p8/Q4_K
+led there, F16/t16p6 leads at full scale. This is the textbook failure of tuning and
+reporting on the same set, and it is now the harness's loudest warning (fleurs_prepare.py
+grew a `dev` split for exactly this reason).
+
+Paired bootstrap (B=2000, utterance resampling, seed 1234):
+
+- **sinc + serving vs the old linear-resample F16 baseline: −0.62 pt, 95 % CI
+  [−1.15, −0.12], p = 0.012.** Real, and it is the session's genuine win.
+- **ROVER 5 vs best single: −0.19 pt, 95 % CI [−0.51, +0.14], p = 0.24.** Not significant.
+  At 5x the compute. The ensemble's apparent value was largely subset noise.
+
+So the honest ladder on FLEURS-fr, full test set, deployment mode:
+
+    reference implementation  12.62 %
+    this port, F16, linear    11.29 %
+    this port, F16, sinc + tuned serving   **10.66 %**   (CI [9.80, 11.59])
+    + 5x ROVER                10.47 %   (not significant)
+
+Sub-10 remains unreached on the full test set. The path there is not more test-time
+compute — the ensemble is measured flat — it is the acoustic front end, where sinc already
+paid 0.6 pt.
