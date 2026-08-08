@@ -1060,6 +1060,7 @@ bool moshi_lmgen_step(
     // pad-vs-word decision. See text_bias.h.
     text_token = moshi_text_bias_pick( lm_states->sampler_out, text_token );
     moshi_margin_note( lm_states->sampler_out, text_token );
+    text_token = moshi_seq_pick( lm_states->sampler_out, text_token );
 #endif
 
     // on_text_hook

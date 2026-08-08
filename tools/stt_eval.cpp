@@ -257,6 +257,7 @@ int main(int argc, char** argv) {
 
         mimi_encode_reset(enc);   // fresh conv state per utterance; LM context persists
         moshi_margin_reset();
+        moshi_seq_reset();
 
         // Causal AGC — strictly speaking a causal peak normalizer / limiter: one-pole peak
         // envelope with instantaneous attack (a loud sample raises the envelope
@@ -301,6 +302,8 @@ int main(int argc, char** argv) {
         const char* base = strrchr(files[fi].c_str(), '/');
         base = base ? base + 1 : files[fi].c_str();
         printf("HYP\t%s\t%s\n", base, text.c_str());
+        if (getenv("MOSHI_LOGPROB"))
+            printf("LP\t%s\t%.4f\n", base, moshi_seq_score());
         if (getenv("MOSHI_MARGIN")) {
             float mn, mean; int n, n_low;
             moshi_margin_stats(&mn, &mean, &n, &n_low);

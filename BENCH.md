@@ -1535,3 +1535,50 @@ The number worth quoting is the *shape* — the near-miss set contains the answe
 
 Instrumentation: MOSHI_TOPK_DUMP=<file> (text_bias.h) writes "tok1 tok2 margin" per real-token
 decision with utterance markers; tools/swap_oracle.py does the analysis.
+
+## Beam search will not work here, and the reason invalidates the 1-swap oracle (2026-08-08)
+
+Before building beam search (multi-hour KV-state work), the go/no-go question: can the model
+rank its own paths without the reference? Same 25 dev utterances, forcing the SECOND-best
+token at decision n and greedy elsewhere, reporting WER and the sequence log-probability:
+
+| forced at | WER | Σ log p |
+|---|---|---|
+| — (greedy) | **7.58 %** | **−47** |
+| n=0 | 12.19 % | −148 |
+| n=1 | 17.30 % | −234 |
+| n=2 | 11.20 % | −243 |
+| n=3 | 13.51 % | −260 |
+| n=5 | 11.53 % | −270 |
+| n=7 | 10.71 % | −272 |
+| n=9 | 11.53 % | −258 |
+| n=12 | 16.80 % | −203 |
+
+Two conclusions, one of them methodological.
+
+**1. There is nothing for a beam to find.** Every divergence is *catastrophically* worse
+(+3 to +10 WER points), not marginally worse. The greedy path is both the best-WER and the
+best-scoring path by a wide margin, at every position tried. The selector works perfectly —
+cumulative log-probability ranks greedy first every time — there is simply nothing better to
+select. Beam search is dropped.
+
+**2. The 1-swap oracle overestimated the prize, and post-hoc edit oracles always will in an
+autoregressive model.** That oracle swapped a token *in the finished output* and re-scored
+the text, implicitly holding the rest of the sequence fixed. But the emitted text token is
+fed back into the LM, so a different choice at frame t changes every frame after t. The
+0.47 pt it promised is not reachable by any search: it is the gain from editing a transcript,
+not from decoding differently. Any future "would search help" analysis on this model must
+force the token through the model, as here, rather than edit the output.
+
+This also reframes the 5-variant oracle (8.33 %): that headroom is real, because those
+variants are genuinely different full decodes (different front end / precision), not
+different paths through one decode. It is reachable only at Nx compute, which does not ship
+on a phone. So:
+
+- front end: exhausted (sinc is the one real win; everything else n.s.)
+- search within one decode: measured empty
+- ensembles across decodes: real (−2.3 pt oracle) but Nx, and majority voting captures
+  almost none of it (−0.19 pt, p = 0.24)
+
+**Sub-10 on the full test set is not reachable by serving-side work.** The remaining levers
+are model-side (a stronger or fine-tuned model), which is outside this paper's scope.
