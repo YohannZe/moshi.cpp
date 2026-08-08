@@ -1582,3 +1582,49 @@ on a phone. So:
 
 **Sub-10 on the full test set is not reachable by serving-side work.** The remaining levers
 are model-side (a stronger or fine-tuned model), which is outside this paper's scope.
+
+## Where the remaining 10.66 % actually lives — and why sub-10 is not closed (2026-08-08)
+
+Error-class analysis of the best full-test system (F16, sinc, tail16/prefix6), 1368
+substitutions over 676 utterances:
+
+| class | count | share of substitutions |
+|---|---|---|
+| **French agreement / homophones** | **363** | **26.5 %** |
+| digit-vs-word formatting (`cinq` → `5`) | 67 | 4.9 % |
+| accent-only | 11 | 0.8 % |
+
+Top substitutions are almost entirely grammatical: `des`→`les` (16), `aux`→`au` (15),
+`est`→`et` (12), `leurs`→`leur` (11), `ces`→`ses`, `à`→`a`, `britannique`→`britanniques`.
+These are **French homophones and number/gender agreement** — pairs that are acoustically
+identical and decidable only from grammar. No acoustic front end can fix them; no amount of
+decoding search can either, since the model is choosing between tokens that sound the same.
+
+What that implies for the target:
+
+| if agreement errors were fixed | WER |
+|---|---|
+| all | 8.65 % |
+| half | 9.65 % |
+| **one third** | **9.99 %** |
+
+**Correcting one third of the agreement errors reaches sub-10.** So the earlier statement
+"sub-10 is not reachable serving-side" was too strong and is withdrawn: it is not reachable
+by the levers tested (front end, in-decode search, ensembles), but a *post-hoc text
+correction* stage is untested and targets exactly the dominant class.
+
+Crucially this is **not** the invalidated edit-oracle: that oracle failed because feeding a
+different token back into the model rewrites the future. A correction stage never re-enters
+the model — it rewrites the finished transcript, so the autoregressive objection does not
+apply. Correction and search are different operations, and the negative for one says nothing
+about the other.
+
+Practical shape, and why it can ship: the candidate set is tiny and closed (des/les, au/aux,
+leur/leurs, est/et, a/à, singular↔plural), so this is a small classifier or n-gram over a
+handful of alternatives per sentence, not an LLM. It runs on text, after the audio pipeline,
+at negligible cost — the constraint that killed ensembles does not bind here.
+
+Also free and legitimate: the 67 digit-formatting substitutions (0.37 pt) are a normalization
+convention, not recognition errors. Whisper's own evaluation applies a number normalizer to
+both sides; ours does not. Adding one to `score_wer.py` is standard practice and must be
+applied symmetrically.
