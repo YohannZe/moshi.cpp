@@ -306,6 +306,9 @@ int main(int argc, char** argv) {
             moshi_margin_stats(&mn, &mean, &n, &n_low);
             printf("CONF\t%s\t%.3f\t%.3f\t%d\t%d\n", base, mn, mean, n, n_low);
         }
+        if (getenv("MOSHI_TOPK_DUMP")) {   // utterance boundary marker for the dump file
+            if (FILE * tf = moshi_topk_file()) fprintf(tf, "# %s\n", base);
+        }
         fflush(stdout);
         if ((fi + 1) % 25 == 0)
             fprintf(stderr, "  %zu/%zu  rtf=%.3f\n", fi + 1, files.size(),

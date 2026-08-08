@@ -1498,3 +1498,40 @@ So the honest ladder on FLEURS-fr, full test set, deployment mode:
 Sub-10 remains unreached on the full test set. The path there is not more test-time
 compute — the ensemble is measured flat — it is the acoustic front end, where sinc already
 paid 0.6 pt.
+
+## Where the remaining headroom is, and whether search can reach it (2026-08-08)
+
+Two oracles, measured rather than assumed, to decide what is worth building next.
+
+**Oracle over the 5 perturbation variants (test, 676):** 8.33 %, against 10.66 % for the best
+single member and 10.47 % for majority voting. So **2.3 points already exist inside
+hypotheses we generate and fail to select** — 225 of 676 utterances are best transcribed by a
+variant that is not the primary. Selection, not generation, is the bottleneck. But an
+N-variant ensemble is Nx compute and cannot ship on a phone, so this number is a *bound*, not
+a plan.
+
+**1-swap oracle (dev, 44 utterances, greedy 7.04 %):** taking the model's second choice at
+the K least-confident frames, best single swap per utterance:
+
+| K frames considered | WER |
+|---|---|
+| 1 | 7.04 % |
+| 3 | 6.76 % |
+| 5 | 6.57 % |
+| 10 | 6.39 % |
+| 20 | 6.30 % |
+
+**A single top-2 substitution at a low-margin frame recovers 0.7 pt.** The correct token *is*
+in the model's near-miss set, and the confidence margin points at where. This is the
+justification for beam search over the text stream: a beam explores exactly these
+alternatives, jointly rather than one at a time, and it does so inside one decode. Cost
+estimate: Mimi (35 % of compute) runs once regardless of beam width, and the LM is
+weight-bound, so B=2 should cost ~1.15x rather than 2x — phone-viable, unlike the ensemble.
+
+Caveats to carry: 44 utterances is a pilot (the CI on 7.04 % is roughly ±2 pt); single swaps
+are a lower bound on what a beam explores but also ignore that a beam must commit without
+seeing the reference; and the dev set cannot resolve sub-0.3 pt effects (§ statistical power).
+The number worth quoting is the *shape* — the near-miss set contains the answer — not 6.30.
+
+Instrumentation: MOSHI_TOPK_DUMP=<file> (text_bias.h) writes "tok1 tok2 margin" per real-token
+decision with utterance markers; tools/swap_oracle.py does the analysis.
