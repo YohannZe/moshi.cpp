@@ -1716,3 +1716,43 @@ FLEURS numbers understate it.
 Q4_K vs F16 on dev: **+0.11 pt** (CI [−0.33, +0.55], p = 0.63) — the same 0.11 pt measured
 independently on the 676-utterance test set. Two disjoint sets, same number to the second
 decimal. That is the strongest evidence in this file that the harness measures what it claims.
+
+## Pair-specialized waveform disambiguator — measured before built, and the economics kill it (2026-08-09)
+
+The idea (user's): at decisions where the model hesitates between a known confusable pair
+(des/les, est/et), let a tiny acoustic classifier on the raw waveform pick. Such a classifier
+fires only when {top1, top2} equals its pair, so its worth is decided by four counts per
+pair, over ALL decisions of the dev set (tools/pair_gate.py, token-space alignment, no
+margin gate):
+
+| pair | fires | top1 right | top2 right | break-even acc |
+|---|---|---|---|---|
+| des/les | 97 | 86 | 7 | **92 %** |
+| est/et | 43 | 38 | 2 | **95 %** |
+| au/aux | 34 | 23 | 5 | 82 % |
+| ique/iques | 33 | 27 | 2 | 93 % |
+| elle/elles | 13 | 10 | 3 | 77 % |
+
+(The raw table is inflated by casing pairs — Les/les, Japon/japon — which the WER
+normalizer lowercases away; excluded above.)
+
+Two hard facts:
+
+1. **Ceiling ≈ 0.2 pt.** Acoustic, WER-relevant top2-right sites total ~20 tokens in
+   12 231 — with a *perfect* classifier.
+2. **Break-even accuracy 82–95 %.** When the pair fires, the model's own choice is right
+   86/93 times for des/les: any classifier worse than 92 % on that binary task makes WER
+   *worse*. It would have to beat a 1B model at its own decision, from the same 16 kHz
+   waveform, using a fraction of the parameters.
+
+Gating on margin < 2 does not rescue it: the pool shrinks to ~5 usable sites per pair and
+the break-evens sit near 50 % only because almost nothing is left.
+
+Verdict: dead on the measurement, before any classifier was trained. Filed with the other
+negatives — the pattern of the week is that every "rescue the decision downstream" idea
+(bigram fusion, beam, ROVER vote, pair classifier) loses to the model's own calibration.
+
+Note the asymmetry with the margin analysis: errors ARE low-margin (median 4.45 vs 8.34),
+but low margin does not mean the runner-up is right — at erroneous 1-token sites the top-2
+is the correct word only ~30 % of the time (and that sample skews toward elision-free
+utterances). Hesitation marks *where* the information died, not a recoverable second option.
