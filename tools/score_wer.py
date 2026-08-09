@@ -28,6 +28,47 @@ import random
 import re
 import sys
 
+_UNITS = ["zéro","un","deux","trois","quatre","cinq","six","sept","huit","neuf","dix",
+          "onze","douze","treize","quatorze","quinze","seize","dix-sept","dix-huit","dix-neuf"]
+_TENS = {20:"vingt",30:"trente",40:"quarante",50:"cinquante",60:"soixante",
+         70:"soixante-dix",80:"quatre-vingts",90:"quatre-vingt-dix"}
+
+def _fr_num(n):
+    """French spelling of 0..9999 — enough to cover every digit token in FLEURS/CV."""
+    if n < 20:
+        return _UNITS[n]
+    if n < 100:
+        t, u = (n // 10) * 10, n % 10
+        if t in (70, 90):
+            t -= 10
+            u += 10
+        base = _TENS[t].rstrip("s") if (t == 80 and u) else _TENS[t]
+        if not u:
+            return base
+        joiner = " et " if u in (1, 11) and t not in (80, 90) else " "
+        return base + joiner + (_UNITS[u] if u < 20 else _fr_num(u))
+    if n < 1000:
+        c, r = divmod(n, 100)
+        head = "cent" if c == 1 else _UNITS[c] + " cents"
+        if r:
+            head = head.rstrip("s") if c > 1 else head
+            return head + " " + _fr_num(r)
+        return head
+    m, r = divmod(n, 1000)
+    head = "mille" if m == 1 else _fr_num(m) + " mille"
+    return head + (" " + _fr_num(r) if r else "")
+
+def spell_numbers(words):
+    """Replace pure-digit tokens with their French spelling, splitting the result into
+    words. Secondary-metric use only: it must be applied to BOTH sides, never one."""
+    out = []
+    for w in words:
+        if w.isdigit() and len(w) <= 4:
+            out.extend(_fr_num(int(w)).replace("-", " ").split())
+        else:
+            out.append(w)
+    return out
+
 def normalize(s: str) -> list[str]:
     s = s.lower()
     s = s.replace("’", "'").replace("`", "'")
@@ -64,7 +105,7 @@ def wer(ref: list[str], hyp: list[str]):
             D += 1; i -= 1
     return (S, I, D, n)
 
-def score_file(refs, hyp_path):
+def score_file(refs, hyp_path, spell=False):
     """Score one hyp file. Returns (per_utt, missing) where per_utt maps
     fname -> (S, I, D, N, ref_text, hyp_text)."""
     per_utt, missing = {}, 0
@@ -76,6 +117,8 @@ def score_file(refs, hyp_path):
             missing += 1
             continue
         r, h = normalize(refs[fname]), normalize(text)
+        if spell:
+            r, h = spell_numbers(r), spell_numbers(h)
         S, I, D, N = wer(r, h)
         per_utt[fname] = (S, I, D, N, refs[fname], text)
     return per_utt, missing
@@ -137,6 +180,7 @@ def main():
     compare_path = None
     if "--compare" in sys.argv:
         compare_path = sys.argv[sys.argv.index("--compare") + 1]
+    spell = "--spell-numbers" in sys.argv
 
     refs = {}
     for line in open(tsv_path, encoding="utf-8"):
@@ -144,7 +188,7 @@ def main():
         if len(cols) >= 4:
             refs[cols[1]] = cols[3]     # filename -> normalized transcription
 
-    per_utt, missing = score_file(refs, hyp_path)
+    per_utt, missing = score_file(refs, hyp_path, spell)
     total_S = sum(v[0] for v in per_utt.values())
     total_I = sum(v[1] for v in per_utt.values())
     total_D = sum(v[2] for v in per_utt.values())
@@ -165,7 +209,7 @@ def main():
               f"  (utterance bootstrap, B={B}, seed={BOOT_SEED})")
 
     if compare_path:
-        pb, _ = score_file(refs, compare_path)
+        pb, _ = score_file(refs, compare_path, spell)
         delta, lo, hi, n_common, p = paired_bootstrap(per_utt, pb, B)
         print(f"vs {compare_path}  (n={n_common} common utterances)")
         print(f"  other WER  : {100*pooled_wer(pb, sorted(set(per_utt) & set(pb))):.2f} %")

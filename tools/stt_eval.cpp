@@ -18,6 +18,13 @@
 //
 // Serving-protocol knobs (the WER-relevant layer -- these, not the engine, are where our
 // port beats the reference implementation, so they deserve to be sweepable):
+//   STT_PASSES=n       feed each utterance n times, transcribe on the last pass only.
+//                      DSM's own math says taking the delay to T recovers the offline
+//                      (full-context) regime; the KV window is 375 frames = 30 s, so on a
+//                      second pass the entire utterance already sits in context and the
+//                      streaming decoder sees, through memory, the "future" of every frame
+//                      it re-decodes. Costs ~2.1x compute (still real-time on device). Text
+//                      from earlier passes is drained by a full tail flush and discarded.
 //   STT_TAIL_EXTRA=n   silence frames flushed beyond the theoretical delay (default 8).
 //                      The reference script flushes ceil(delay*fps)=7 total and strands
 //                      trailing words; we default to delay+8=14.
@@ -207,6 +214,7 @@ int main(int argc, char** argv) {
     const int   frame_size = mimi_frame_size(codec);
     const int   codec_rate = (int)(frame_rate * frame_size + 0.5f);
     const int   tail_extra = getenv("STT_TAIL_EXTRA") ? atoi(getenv("STT_TAIL_EXTRA")) : 8;
+    const int   passes     = getenv("STT_PASSES") ? std::max(1, atoi(getenv("STT_PASSES"))) : 1;
     const int   tail_frames = (int)(cfg.stt_config.audio_delay_seconds * frame_rate) + tail_extra;
     const int   prefix_frames = getenv("STT_PREFIX") ? atoi(getenv("STT_PREFIX")) : 0;
     const bool  agc_on = getenv("STT_AGC") && getenv("STT_AGC")[0] == '1';
@@ -284,17 +292,21 @@ int main(int argc, char** argv) {
         const int n_frames = (int)(audio.size() / frame_size);
         std::string text;
         auto t0 = std::chrono::steady_clock::now();
-        for (int i = -prefix_frames; i < n_frames + tail_frames; i++) {
-            float* frame = (i >= 0 && i < n_frames)
-                               ? (audio.data() + (size_t)i * frame_size)
-                               : silence.data();
-            mimi_encode_send(enc, frame);
-            mimi_encode_receive(enc, tokens.data());
-            moshi_lm_send2(gen, tokens);
-            int text_token = 0; float vad = 0;
-            moshi_lm_receive2(gen, text_token, vad);
-            if (text_token != 0 && text_token != 3)
-                text += detok(tokenizer_id_to_piece(tok, text_token));
+        for (int p = 0; p < passes; p++) {
+            const bool collect = (p == passes - 1);
+            const int  pre     = (p == 0) ? prefix_frames : 0;  // codec settles once
+            for (int i = -pre; i < n_frames + tail_frames; i++) {
+                float* frame = (i >= 0 && i < n_frames)
+                                   ? (audio.data() + (size_t)i * frame_size)
+                                   : silence.data();
+                mimi_encode_send(enc, frame);
+                mimi_encode_receive(enc, tokens.data());
+                moshi_lm_send2(gen, tokens);
+                int text_token = 0; float vad = 0;
+                moshi_lm_receive2(gen, text_token, vad);
+                if (collect && text_token != 0 && text_token != 3)
+                    text += detok(tokenizer_id_to_piece(tok, text_token));
+            }
         }
         total_compute_ms += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - t0).count();
