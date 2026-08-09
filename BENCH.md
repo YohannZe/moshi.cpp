@@ -1660,3 +1660,59 @@ Accent normalization, the other open question: stripping accents from both sides
 **10.66 → 10.59 %** — 0.07 pt. Real but negligible, and it does not change any conclusion.
 Keep accents (FLEURS' own reference column keeps them, and `à` vs `a` are different French
 words); note the number and move on.
+
+# Overnight diagnostic battery (2026-08-09) — where the acoustically-distinct errors come from
+
+80 % of substitutions are pairs the waveform can separate (`des`/`les`, `est`/`et`), so the
+question is what destroys that information before the text decision. Three suspects: the LM
+prior overriding evidence, the RVQ codec discarding detail, the 16 kHz source missing the
+band the model was trained on. All measured on dev (n=289), paired bootstrap B=2000.
+
+## 1. The model HESITATES where it is wrong — the prior is not the culprit
+
+Margin (top1−top2) of tokens inside correct words vs inside substituted words, over the full
+dev set:
+
+| | median margin | share below 2.0 |
+|---|---|---|
+| token in a correct word | 8.34 | 8.0 % |
+| token in an erroneous word | **4.45** | **29.3 %** |
+
+Ratio 0.53, and 3.7× the rate of near-ties. The acoustic evidence arriving at the decision is
+genuinely weak where errors happen; the model is not confidently overruling a clear signal.
+**Suspect "LM prior" eliminated**, and with it the whole "cool the context" direction.
+
+Confirmed independently: cooling the context by injecting 3.2 s of leading silence makes
+things **worse**, +0.95 pt (CI [+0.25, +1.66], p = 0.007). The persistent context is a
+feature, not a liability — the opposite of what a prior-dominance story predicts.
+
+## 2. The model does use the top of its band
+
+Low-passing the input (4-pole, forward-only) before the pipeline:
+
+| cutoff | WER | vs full band |
+|---|---|---|
+| full band (8 kHz Nyquist) | **9.09 %** | — |
+| 6 kHz | 9.94 % | **+0.85 pt, p = 0.016** |
+| 4 kHz | 9.81 % | — |
+| 3 kHz | 9.40 % | — |
+
+Removing 6–8 kHz costs a significant 0.85 pt, so the band carries information the model uses
+— consistent with the errors being stop/fricative confusions whose cues live there.
+
+**The non-monotonicity (3 kHz apparently better than 6 kHz) is not real**: 3 kHz vs 6 kHz is
+−0.54 pt with CI [−1.28, +0.18], p = 0.16. It is exactly the sub-0.7 pt regime dev cannot
+resolve. Reporting the ordering as a finding would be the same mistake as the subset sub-10.
+
+**What this does NOT establish**: that the *missing* 8–12 kHz octave (empty because FLEURS is
+16 kHz while the model trained at 24 kHz) costs anything. That the model uses 6–8 kHz makes it
+plausible, but the only honest test needs a natively-24 kHz French corpus with references,
+which we do not have. Recorded as the top open question — and note that Katarina captures at
+24 kHz natively, so if the effect is real the app already sits in the better regime and our
+FLEURS numbers understate it.
+
+## 3. Reproducibility check that passed
+
+Q4_K vs F16 on dev: **+0.11 pt** (CI [−0.33, +0.55], p = 0.63) — the same 0.11 pt measured
+independently on the 676-utterance test set. Two disjoint sets, same number to the second
+decimal. That is the strongest evidence in this file that the harness measures what it claims.
