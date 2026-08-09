@@ -1796,3 +1796,31 @@ reference-property filter, so it cannot bias the paired delta) — running. If �
 n=1200 the CI tightens to roughly ±1 pt and the effect resolves; if it shrinks, the octave
 story dies and the §2.6bis open question gets a negative answer. Either way the paper gets
 a measured entry instead of a speculation.
+
+## Missing-octave experiment, n=1200 — the effect does not survive scaling (2026-08-09)
+
+| n | wide | narrow | paired delta | p |
+|---|---|---|---|---|
+| 300 (pilot) | 25.30 % | 26.33 % | −1.03 pt | 0.32 |
+| **1200, digit sentences excluded** | **22.64 %** | **23.01 %** | **−0.37 pt, CI [−1.28, +0.54]** | **0.44** |
+
+The pilot's −1 pt was mostly noise: quadrupling n shrank the point estimate to −0.37 and the
+effect is consistent with zero. The moonshot version of the claim — "16 kHz benchmarks
+systematically understate 24 kHz-trained codec models" — is **not supported on this
+material**: if the octave carries anything on CV-fr read speech, it is bounded by ~1 pt and
+likely well under.
+
+Interesting asymmetry with the FLEURS low-pass probe: *removing* 6–8 kHz (a band the model
+gets in every input) costs a significant +0.85 pt, but *restoring* 8–12 kHz (a band absent
+from FLEURS) buys nothing measurable. The model exploits what its input distribution
+reliably contains, and the stop-consonant cues evidently survive below 8 kHz.
+
+Caveats kept with the number: CV audio is 32 kbps MP3, whose lossy shelving attenuates
+exactly the treatment band, so this understates a pristine-24 kHz effect by some unknown
+amount; and read-aloud crowd speech at 23 % WER is not FLEURS. The claim "Katarina, capturing
+at 24 kHz, already sits in a better regime than our FLEURS numbers show" must be softened to
+"at most a small effect, unproven".
+
+§2.6bis's top open question is hereby answered at the precision this project can reach:
+measured twice, bounded, small if real. Chasing it further (n≈5000, 12 h) would buy a CI of
+±0.45 on an effect of −0.37 — not worth the compute.
