@@ -1848,3 +1848,29 @@ Katarina's binding constraint (sustained throttling at 65 °C, battery). Cost: r
 fork onto a tree with the backend, verify our op set (standard ops + argmax + RVQ matvec),
 Q4_0 requant. Days of work, experimental-quality backend — the right time is after the paper,
 not before.
+
+## Double-feed (pseudo-offline via KV memory) — significantly worse, monotonically (2026-08-09)
+
+The idea, straight from DSM's own math (τ→T recovers offline): re-feed the utterance and
+transcribe on the second pass, so the 375-frame KV window holds the entire utterance while
+every frame is re-decoded — full-utterance context, which is exactly what offline
+whisper-medium (9.69 vs our 10.66) exploits. Implementation: STT_PASSES in stt_eval, pass-1
+text drained by a full tail flush and discarded, ~2.1x compute (still real-time on device).
+
+| dev (289) | WER | paired vs single |
+|---|---|---|
+| 1 pass | 9.09 % | — |
+| 2 passes | 9.66 % | **+0.57 pt, CI [+0.14, +1.02], p = 0.013** |
+| 3 passes | 9.91 % | worse again — monotone in passes |
+
+**Memory context is not right-context.** Three consistent mechanisms, all compatible with the
+data: (a) the model was never trained on repeated speech — a re-heard sentence is not a
+better-known sentence, it is a speaker repeating themselves; (b) pass-1's own hypothesis text
+sits in the context and anchors the same errors (self-confirmation rather than correction);
+(c) the utterance-initial weakness the idea targeted needs *acoustic* right-context at the
+frame level, which KV memory of a past pass does not provide — the attention has the
+information but the training objective never taught the model to consult it that way.
+
+Monotonic degradation with passes is the useful signature: if this were noise it would not
+order. The offline gap (≈1 pt to whisper-medium) is a *training-objective* gap, not a
+serving-reachable one — sixth and cleanest confirmation of the week's pattern.
