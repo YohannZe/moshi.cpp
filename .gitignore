@@ -26,6 +26,6 @@ build-android-cl/
 third_party/
 build-android/
 build-android-cl/
-models/
+/models/
 eval-data/
 __pycache__/

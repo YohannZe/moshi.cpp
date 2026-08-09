@@ -18,6 +18,9 @@
 //
 // Serving-protocol knobs (the WER-relevant layer -- these, not the engine, are where our
 // port beats the reference implementation, so they deserve to be sweepable):
+//   STT_BIAS_TSV=f     per-utterance hotword biasing: file of "basename<TAB>w1 w2 ...".
+//                      Words are boosted in logit space during decoding (LOGIC-style).
+//   STT_BIAS_START/STT_BIAS_CONT  boost for a word's first/continuation token (2/4).
 //   STT_PASSES=n       feed each utterance n times, transcribe on the last pass only.
 //                      DSM's own math says taking the delay to T recovers the offline
 //                      (full-context) regime; the KV window is 375 frames = 30 s, so on a
@@ -49,6 +52,7 @@
 #include <chrono>
 #include <string>
 #include <vector>
+#include <map>
 #include <algorithm>
 
 #include <ggml.h>
@@ -215,6 +219,24 @@ int main(int argc, char** argv) {
     const int   codec_rate = (int)(frame_rate * frame_size + 0.5f);
     const int   tail_extra = getenv("STT_TAIL_EXTRA") ? atoi(getenv("STT_TAIL_EXTRA")) : 8;
     const int   passes     = getenv("STT_PASSES") ? std::max(1, atoi(getenv("STT_PASSES"))) : 1;
+    std::map<std::string, std::vector<std::string>> bias_words;
+    if (const char * bp = getenv("STT_BIAS_TSV")) {
+        FILE * bf = fopen(bp, "r");
+        char line[4096];
+        while (bf && fgets(line, sizeof line, bf)) {
+            char * tab = strchr(line, '\t');
+            if (!tab) continue;
+            *tab = 0;
+            std::vector<std::string> ws;
+            for (char * w = strtok(tab + 1, " \n"); w; w = strtok(nullptr, " \n"))
+                ws.push_back(w);
+            bias_words[line] = ws;
+        }
+        if (bf) fclose(bf);
+        fprintf(stderr, "bias lists: %zu files\n", bias_words.size());
+        moshi_bias_boosts(getenv("STT_BIAS_START") ? atof(getenv("STT_BIAS_START")) : 2.f,
+                          getenv("STT_BIAS_CONT")  ? atof(getenv("STT_BIAS_CONT"))  : 4.f);
+    }
     const int   tail_frames = (int)(cfg.stt_config.audio_delay_seconds * frame_rate) + tail_extra;
     const int   prefix_frames = getenv("STT_PREFIX") ? atoi(getenv("STT_PREFIX")) : 0;
     const bool  agc_on = getenv("STT_AGC") && getenv("STT_AGC")[0] == '1';
@@ -263,6 +285,23 @@ int main(int argc, char** argv) {
         }
         total_audio_s += (double)audio_in.size() / in_rate;
 
+        {   // per-utterance hotword list (surface + capitalized variants)
+            moshi_bias_clear();
+            const char * b0 = strrchr(files[fi].c_str(), '/');
+            auto it = bias_words.find(b0 ? b0 + 1 : files[fi].c_str());
+            if (it != bias_words.end()) {
+                int ids[64];
+                for (auto & w : it->second) {
+                    int n = tokenizer_encode_word(tok, w.c_str(), ids, 64);
+                    moshi_bias_add(ids, n);
+                    std::string cap = w; cap[0] = toupper((unsigned char)cap[0]);
+                    if (cap != w) {
+                        n = tokenizer_encode_word(tok, cap.c_str(), ids, 64);
+                        moshi_bias_add(ids, n);
+                    }
+                }
+            }
+        }
         mimi_encode_reset(enc);   // fresh conv state per utterance; LM context persists
         moshi_margin_reset();
         moshi_seq_reset();

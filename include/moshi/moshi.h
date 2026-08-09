@@ -73,6 +73,8 @@ MOSHI_API bool tokenizer_empty( tokenizer_t * tok );
 MOSHI_API int tokenizer_send( tokenizer_t * tok, std::string text );
 MOSHI_API int tokenizer_receive( tokenizer_t * tok, Entry * entry );
 MOSHI_API std::string tokenizer_id_to_piece( tokenizer_t * tok, int token );
+// Encode one word to its token ids (as the DSM text stream would carry it). Returns count.
+MOSHI_API int tokenizer_encode_word( tokenizer_t * tok, const char * word, int * out, int cap );
 
 // MARK: Config
 

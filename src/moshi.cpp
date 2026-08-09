@@ -627,6 +627,15 @@ std::string tokenizer_id_to_piece( tokenizer_t * tok, int token ) {
     return tok->sp.IdToPiece( token );
 }
 
+int tokenizer_encode_word( tokenizer_t * tok, const char * word, int * out, int cap ) {
+    std::vector<int> ids;
+    std::string w( word );
+    tok->sp.Encode( w, &ids );
+    int n = (int) std::min( (size_t) cap, ids.size() );
+    for ( int i = 0; i < n; i++ ) out[i] = ids[i];
+    return n;
+}
+
 // MARK: LM
 
 struct moshi_lm_t {
