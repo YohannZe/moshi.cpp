@@ -117,3 +117,28 @@ the training-time fix; augmentations are data-pipeline changes, near-free at tra
 | flush-invariance tune (2.2) | same rig, smaller | robustness + a novel publishable claim | ride along with 2.1 |
 | QAT | same rig | +0.11 pt ceiling | no |
 | next-model recs (§3) | a README section | community value; strengthens the paper's §"implications" | free — fold into PAPER.md |
+
+---
+
+## 5. What the DSM paper itself says (read 2026-08-09, arXiv:2509.08753) — and the lever kyutai kept
+
+Read against our measurements, three things stand out:
+
+1. **Delay conditioning is the paper's best ASR trick — and it is not in the released 1B.**
+   They train DSM-ASR over *random* delays with a cosine embedding of the target delay summed
+   into the inputs; one conditioned model **outperforms every fixed-delay variant**, and the
+   effective delay tracks the conditioning within ~300 ms. Our checkpoint's config says
+   `"conditioners": {}` (verified in the GGUF and the HF config): stt-1b-en_fr is fixed at
+   τ=0.5 s. So the quality-vs-latency dial exists in the method but not in the shipped
+   weights — for Katarina, which buffers transcripts and could happily absorb 1–2 s of extra
+   delay, a conditioned checkpoint would be free quality. **Add to §2.1's fine-tune: train
+   the LoRA with delay conditioning** (the paper proves it composes with the task), or ask
+   kyutai to release the conditioned variant.
+2. **Their training pipeline validates the §2.1 plan**: pseudo-labels from Whisper first,
+   then fine-tune on ground-truth transcripts (WER 6.4 % after fine-tuning stage), with
+   codebook-dropout augmentation. Our LoRA plan is a miniature of their own second stage.
+3. **PAD/WORD is the whole text-stream protocol** (word start index = floor(s·fr), tokens
+   follow, PAD elsewhere; loss on PAD/WORD trains word boundaries). This explains a week of
+   our serving results mechanically: the flush window works because trailing text is still
+   scheduled behind τ; the 12-frame prefix hurt because PAD-heavy context is itself a
+   trained signal ("nobody is speaking"), not neutral filler.

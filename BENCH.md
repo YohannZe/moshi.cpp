@@ -1824,3 +1824,27 @@ at 24 kHz, already sits in a better regime than our FLEURS numbers show" must be
 §2.6bis's top open question is hereby answered at the precision this project can reach:
 measured twice, bounded, small if real. Chasing it further (n≈5000, 12 h) would buy a CI of
 ±0.45 on an effect of −0.37 — not worth the compute.
+
+## Is inference at the ceiling? The roofline, computed (2026-08-09)
+
+Device sustained: RTF 0.327 → 26.2 ms per 80 ms frame (spec=2, ctx 375, Q4_K, llamafile,
+flash attention on — every one of those is already banked). Bytes per frame: LM Q4_K
+989 M × 4.5 bit ≈ 556 MB, reduced ~30 % by spec-2 batch acceptance → ~400 MB, plus quantized
+Mimi ~60 MB and small KV reads → **~0.5 GB/frame ≈ 18–19 GB/s sustained**. A realistic
+CPU-attainable bandwidth on SM8850 (LPDDR5X, big cluster, thermally capped) is ~35–45 GB/s.
+
+So the arithmetic headroom on CPU is ≤ 2×, and the two measured facts eat most of it: the
+workload is bandwidth-bound (Q8_0 predicted 1.89× bytes, measured 1.90× time), and the cores
+already idle at 1.9 of 3.6 GHz — frequency does not convert. Every byte-reduction lever below
+Q4_K is measured negative (q3_k +16 % time, iq/imatrix hurt the LM, codec below F16 costs
+2–3 WER pt). **On this CPU, with this architecture, we are near the practical floor**; grinding
+for another 10–20 % is possible but would trade against the thermal budget that already binds.
+
+The one big lever left is not a CPU lever: **the Hexagon NPU now has an official, experimental
+backend in upstream llama.cpp/ggml** (docs/backend/snapdragon; hexagon v73–v81; Q4_0,
+MUL_MAT, FLASH_ATTN_EXT). Published numbers for a 1B Q4_0: ~51 t/s token-gen — parity with
+our CPU pace, so the prize is not speed but **power and thermal headroom**, which is exactly
+Katarina's binding constraint (sustained throttling at 65 °C, battery). Cost: rebase our ggml
+fork onto a tree with the backend, verify our op set (standard ops + argmax + RVQ matvec),
+Q4_0 requant. Days of work, experimental-quality backend — the right time is after the paper,
+not before.
