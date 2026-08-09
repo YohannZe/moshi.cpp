@@ -1756,3 +1756,22 @@ Note the asymmetry with the margin analysis: errors ARE low-margin (median 4.45 
 but low margin does not mean the runner-up is right — at erroneous 1-token sites the top-2
 is the correct word only ~30 % of the time (and that sample skews toward elision-free
 utterances). Hesitation marks *where* the information died, not a recoverable second option.
+
+## Whisper reference points on our exact benchmark (2026-08-09)
+
+Same 676 FLEURS-fr files, same scorer, same machine — faster-whisper int8, beam 5, language
+pinned. These replace any number transcribed from the Whisper paper (whose FLEURS appendix
+has rotated headers that do not survive PDF extraction — we do not cite it).
+
+| system | params | mode | WER | host RTF |
+|---|---|---|---|---|
+| whisper small | 244 M | offline, 30 s window, beam 5 | 12.81 % | 0.142 |
+| **stt-1b (this port, tuned)** | 1 B | **streaming, 80 ms frames** | **10.66 %** | 0.344 |
+| whisper medium | 769 M | offline, 30 s window, beam 5 | **9.69 %** | 0.445 |
+| kyutai reference impl | 1 B | streaming | 12.62 % | 2.95 |
+
+Read honestly: our streaming port beats the like-for-like streaming reference by 2 pt and
+beats offline whisper-small by 2.2 pt, but an offline whisper-medium with a beam still leads
+us by 1 pt — sequence-level search over full utterances buys real accuracy that a strictly
+streaming decoder cannot reach. That is the fair framing for the paper: within the
+streaming-on-device deployment class we are ahead; the offline class keeps an edge.
