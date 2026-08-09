@@ -1874,3 +1874,23 @@ information but the training objective never taught the model to consult it that
 Monotonic degradation with passes is the useful signature: if this were noise it would not
 order. The offline gap (≈1 pt to whisper-medium) is a *training-objective* gap, not a
 serving-reachable one — sixth and cleanest confirmation of the week's pattern.
+
+## Speculation depth and threads, re-swept post-llamafile (2026-08-09, host)
+
+STT_SPEC_N on test_16k, Q4_K, 6 threads — output byte-identical at every depth (chars=588;
+speculation is lossless by construction, rollback on mismatch):
+
+| spec | host RTF |
+|---|---|
+| 1 | 0.271 |
+| **2 (shipped)** | **0.257** |
+| 3 | 0.259 |
+| 4 | 0.274 |
+
+spec=2 was and remains the optimum; deeper speculation re-pays the batch cost more often than
+it wins. Closed.
+
+Threads at spec=2: host optimum moved 6 → 8 post-llamafile (0.257 → 0.244, +5 %); 10 and 12
+regress. **Host-only finding** — the Ryzen has 8 homogeneous fast cores, the SM8850 does not,
+and its measured optimum (6) predates tinyBLAS. Device re-test queued for when the phone is
+next plugged: one line in the JNI if it reproduces, nothing if it doesn't.
