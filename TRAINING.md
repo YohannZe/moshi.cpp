@@ -142,3 +142,43 @@ Read against our measurements, three things stand out:
    our serving results mechanically: the flush window works because trailing text is still
    scheduled behind τ; the 12-frame prefix hurt because PAD-heavy context is itself a
    trained signal ("nobody is speaking"), not neutral filler.
+
+---
+
+## 6. What training THIS model actually cost kyutai — and the three tiers open to us
+
+From the DSM paper (§4.2), the real recipe for stt-1b:
+
+| stage | data | compute |
+|---|---|---|
+| pretraining (hard distillation of whisper-timestamped) | **2.5 M hours** en+fr, pseudo-labels, 90 s segments | 1.6 M steps on **48 H100** |
+| fine-tune | 28 k h ground-truth public data + codebook dropout | 100 k updates, batch 128, **16 H100** |
+| long-form adaptation | long-form mixture | 25 k updates, batch 32, 16 H100 |
+
+Order-of-magnitude bill: pretraining alone is tens of thousands of H100-hours (~10⁵ €);
+the fine-tune stages a few thousand more. Mimi is reused frozen — "training a model like
+this" means training the 1B backbone, not the codec.
+
+### The three tiers, priced
+
+**Tier A — LoRA French (the one to actually do).** stt-1b is 7× smaller than the Moshi
+model moshi-finetune quotes 39.6 GB for — a LoRA fits a rented RTX 4090 (24 GB) at
+~0.5 €/h, an H100 makes it comfortable. Data: CV-fr (≥1000 h validated, free, already
+pipelined in this repo) — the LoRA regime needs 50–200 h. Wall time hours, **total
+10–30 €**. Expected from the error taxonomy: half the agreement class ≈ −0.7 pt → ~9.9 %,
+plus delay conditioning and flush invariance trained in (§5). Pre-registered criterion in
+§2.1 still stands.
+
+**Tier B — full French fine-tune (reproduce their stage 2, French-only).** All 1B params,
+1–5 k h public French (MLS-fr 1.1 k h + CV-fr + VoxPopuli-fr), 1–2×H100 for a few days,
+**~200–500 €**. This is the "French specialist stt-1b" — plausibly −1.5…−2 pt and a model
+worth releasing on its own. The paper's own stage-2 hyperparameters transfer directly.
+
+**Tier C — from scratch.** 2.5 M hours and 48 H100 for weeks: **~10⁵ €**, out of scope. The
+paper's own "public data only" reproduction (88 k h, done for TTS) shows a legitimate
+~10–20 k€ path, but Tier B captures most of the value for 2 % of the price.
+
+The through-line: every Tier A/B ingredient is already de-risked by this repo — the data
+pipeline exists (cv_prep.py), the eval harness is trustworthy (reproducibility check passed),
+the error taxonomy says exactly what to train against, and the serving protocol to re-tune
+afterwards is documented.
