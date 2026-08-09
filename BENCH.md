@@ -1894,3 +1894,29 @@ Threads at spec=2: host optimum moved 6 → 8 post-llamafile (0.257 → 0.244, +
 regress. **Host-only finding** — the Ryzen has 8 homogeneous fast cores, the SM8850 does not,
 and its measured optimum (6) predates tinyBLAS. Device re-test queued for when the phone is
 next plugged: one line in the JNI if it reproduces, nothing if it doesn't.
+
+## Contextual biasing, test confirmation — recall transfers, the WER gain does not (2026-08-10)
+
+Continuation-only hotword biasing (start=0, cont=7 — dev winner of a monotone 3/5/7 curve),
+oracle entities + 10 distractors per utterance, single test run:
+
+| | dev (289) | test (676) |
+|---|---|---|
+| WER delta vs no-bias | −0.23 pt (p < 0.0005) | **+0.01 pt (CI [−0.37, +0.44], p = 1.0)** |
+| entity recall | 65.9 → 71.3 % (+5.4) | **66.8 → 72.6 % (+5.8, 775 slots)** |
+
+Two honest conclusions:
+
+1. **The capability works and its targeted metric transfers almost exactly** (+5.4 dev /
+   +5.8 test recall). Continuation-only biasing raises proper-noun recall by ~6 points at
+   WER parity, training-free. For Katarina this is the metric that matters — "did it get
+   the name" — and the rolling transcript supplies the bias list for free.
+2. **The dev WER gain (significant, CI [−0.32, −0.07]) did not replicate on test** (0.00).
+   Even a tight bootstrap CI on 289 utterances can be dev-specific when the effect is
+   sparse: the entity fixes are offset on test by scattered false-completions elsewhere.
+   Dev-significant ≠ test-real; one more entry for the threats-to-validity section, this
+   time caught by the discipline rather than after the fact.
+
+Protocol note: recall is computed on mid-sentence-capitalized reference words; the bias
+lists are the standard oracle+distractor construction of the biasing literature — in
+deployment the list comes from user context (here: the app's rolling transcript).
