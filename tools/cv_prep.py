@@ -18,8 +18,11 @@ Selection guards, each excluding a real confound:
     browsers upsample 16 kHz headsets and the metadata cannot tell; the spectrum can.
   - sentence has >= 3 words (CV has single-word clips)
 
-usage: cv_prep.py <cv_dir> <n_clips> <out_dir>
+usage: cv_prep.py <cv_dir> <n_clips> <out_dir> [nodigits]
   expects <cv_dir>/clips/*.mp3 and <cv_dir>/test.tsv
+  nodigits: drop sentences containing digits — the model spells numbers out, CV writes
+  them as figures, and that normalization noise inflates per-utterance variance without
+  informing the bandwidth question. Reference-based, so it cannot bias the paired delta.
 """
 import csv
 import os
@@ -29,14 +32,18 @@ import sys
 import numpy as np
 
 cv_dir, n_want, out_dir = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+nodigits = len(sys.argv) > 4 and sys.argv[4] == "nodigits"
 os.makedirs(f"{out_dir}/wide", exist_ok=True)
 os.makedirs(f"{out_dir}/narrow", exist_ok=True)
 
 rows = []
 with open(f"{cv_dir}/test.tsv", encoding="utf-8") as f:
     for r in csv.DictReader(f, delimiter="\t"):
-        if len(r["sentence"].split()) >= 3:
-            rows.append((r["path"], r["sentence"]))
+        if len(r["sentence"].split()) < 3:
+            continue
+        if nodigits and any(ch.isdigit() for ch in r["sentence"]):
+            continue
+        rows.append((r["path"], r["sentence"]))
 print(f"{len(rows)} candidate rows", file=sys.stderr)
 
 def decode(path, rate):

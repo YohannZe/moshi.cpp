@@ -1775,3 +1775,24 @@ beats offline whisper-small by 2.2 pt, but an offline whisper-medium with a beam
 us by 1 pt — sequence-level search over full utterances buys real accuracy that a strictly
 streaming decoder cannot reach. That is the fair framing for the paper: within the
 streaming-on-device deployment class we are ahead; the offline class keeps an edge.
+
+## Missing-octave experiment, pilot n=300 (2026-08-09) — direction right, power wrong
+
+First controlled test of the question FLEURS cannot answer. 300 Common Voice fr clips with
+spectrally-verified HF content (9-15 kHz within 55 dB of the 1-4 kHz band — metadata lies,
+the spectrum doesn't), same clips in two conditions: native→24 kHz (octave present, the
+regime Katarina records in) vs native→16 kHz→our standard FLEURS chain (octave empty).
+Peak-norm after resampling, tail16/prefix6, F16.
+
+| condition | WER |
+|---|---|
+| wide (8-12 kHz present) | 25.30 % |
+| narrow (16 kHz regime) | 26.33 % |
+| paired delta | **−1.03 pt, CI [−3.10, +1.03], p = 0.32** |
+
+Not resolvable at n=300: CV crowd recordings run ~25 % WER and the per-utterance variance
+swamps a 1 pt effect. Scaled to n=1200 with digit-bearing sentences excluded (a
+reference-property filter, so it cannot bias the paired delta) — running. If −1 pt holds at
+n=1200 the CI tightens to roughly ±1 pt and the effect resolves; if it shrinks, the octave
+story dies and the §2.6bis open question gets a negative answer. Either way the paper gets
+a measured entry instead of a speculation.
